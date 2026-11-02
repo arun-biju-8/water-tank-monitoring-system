@@ -22,6 +22,18 @@ from app.models import WaterReading
 
 client = TestClient(app)
 
+TEST_DEVICE_KEY = "hardware_secret_key_456"
+AUTH_HEADERS_DEVICE = {"X-Device-Key": TEST_DEVICE_KEY}
+
+
+@pytest.fixture(autouse=True)
+def setup_test_environment(monkeypatch):
+    """
+    Sets default environment variables for test execution.
+    Can be overridden within specific tests using monkeypatch.
+    """
+    monkeypatch.setenv("ESP32_API_KEY", TEST_DEVICE_KEY)
+
 
 # ==============================================================================
 # 1. Pydantic Schema Validation Tests
@@ -179,7 +191,7 @@ def test_post_reading_validation_failure_exceeds_100():
         "alarm": True,
         "muted": False,
     }
-    response = client.post("/api/readings", json=invalid_payload)
+    response = client.post("/api/readings", json=invalid_payload, headers=AUTH_HEADERS_DEVICE)
     assert response.status_code == 422
     assert "water_level" in str(response.json())
 
@@ -193,14 +205,14 @@ def test_post_reading_validation_failure_negative():
         "probe_75": False,
         "probe_100": False,
     }
-    response = client.post("/api/readings", json=invalid_payload)
+    response = client.post("/api/readings", json=invalid_payload, headers=AUTH_HEADERS_DEVICE)
     assert response.status_code == 422
     assert "water_level" in str(response.json())
 
 
 def test_post_reading_validation_failure_missing_body():
     """API must reject empty POST payload with 422."""
-    response = client.post("/api/readings", json={})
+    response = client.post("/api/readings", json={}, headers=AUTH_HEADERS_DEVICE)
     assert response.status_code == 422
 
 
@@ -231,7 +243,7 @@ def test_endpoints_return_503_when_database_offline():
             "alarm": False,
             "muted": False,
         }
-        post_res = client.post("/api/readings", json=valid_payload)
+        post_res = client.post("/api/readings", json=valid_payload, headers=AUTH_HEADERS_DEVICE)
         assert post_res.status_code == 503
         assert "Database connection error" in post_res.json()["detail"]
 
@@ -288,7 +300,7 @@ def test_mocked_db_post_reading_success():
             "alarm": True,
             "muted": False,
         }
-        res = client.post("/api/readings", json=payload)
+        res = client.post("/api/readings", json=payload, headers=AUTH_HEADERS_DEVICE)
         assert res.status_code == 201
         data = res.json()
         assert data["id"] == 1
@@ -531,7 +543,7 @@ def test_post_reading_returns_ist_timestamp():
             "alarm": False,
             "muted": False,
         }
-        res = client.post("/api/readings", json=payload)
+        res = client.post("/api/readings", json=payload, headers=AUTH_HEADERS_DEVICE)
         assert res.status_code == 201
         data = res.json()
         assert data["id"] == 7
@@ -790,6 +802,11 @@ def test_server_missing_credentials_returns_503(monkeypatch):
     assert res_ack.status_code == 503
     assert "ESP32_API_KEY is not configured" in res_ack.json()["detail"]
 
+    # 4. Telemetry posting with unset server key -> 503
+    res_telemetry = client.post("/api/readings", json={"water_level": 50, "probe_25": True, "probe_50": True, "probe_75": False, "probe_100": False, "alarm": False, "muted": False})
+    assert res_telemetry.status_code == 503
+    assert "ESP32_API_KEY is not configured" in res_telemetry.json()["detail"]
+
 
 def test_render_production_blocks_dev_bypass(monkeypatch):
     """Verify that on Render, ALLOW_INSECURE_DEV_AUTH=true is strictly ignored and blocked."""
@@ -801,6 +818,11 @@ def test_render_production_blocks_dev_bypass(monkeypatch):
     res = client.post("/api/commands/mute", json={"device_id": "esp32-tank-01"})
     assert res.status_code == 503
     assert "DASHBOARD_CONTROL_TOKEN is not configured" in res.json()["detail"]
+
+    # Telemetry is also blocked on Render when API key is missing, ignoring dev bypass
+    res_telemetry = client.post("/api/readings", json={"water_level": 50, "probe_25": True, "probe_50": True, "probe_75": False, "probe_100": False, "alarm": False, "muted": False})
+    assert res_telemetry.status_code == 503
+    assert "ESP32_API_KEY is not configured" in res_telemetry.json()["detail"]
 
 
 def test_command_ownership_enforcement(monkeypatch):
@@ -1048,3 +1070,82 @@ def test_history_readings_limit_bounds():
     # limit = 501 -> 422
     res_over = client.get("/api/readings/history?limit=501")
     assert res_over.status_code == 422
+
+# ==============================================================================
+# Telemetry Authentication Tests (POST /api/readings)
+# ==============================================================================
+
+def test_post_reading_requires_device_key():
+    """POST /api/readings must reject requests without X-Device-Key with 401."""
+    payload = {
+        "water_level": 50,
+        "probe_25": True,
+        "probe_50": True,
+        "probe_75": False,
+        "probe_100": False,
+        "alarm": False,
+        "muted": False,
+    }
+    # Omit X-Device-Key header
+    res = client.post("/api/readings", json=payload)
+    assert res.status_code == 401
+    assert "Unauthorized" in res.json()["detail"]
+
+
+def test_post_reading_rejects_invalid_device_key():
+    """POST /api/readings must reject requests with wrong X-Device-Key with 401."""
+    payload = {
+        "water_level": 50,
+        "probe_25": True,
+        "probe_50": True,
+        "probe_75": False,
+        "probe_100": False,
+        "alarm": False,
+        "muted": False,
+    }
+    res = client.post("/api/readings", json=payload, headers={"X-Device-Key": "invalid_wrong_key"})
+    assert res.status_code == 401
+    assert "Unauthorized" in res.json()["detail"]
+
+
+def test_post_reading_missing_server_key_returns_503(monkeypatch):
+    """POST /api/readings must return 503 if server has not configured ESP32_API_KEY."""
+    monkeypatch.delenv("ESP32_API_KEY", raising=False)
+    monkeypatch.delenv("ALLOW_INSECURE_DEV_AUTH", raising=False)
+    payload = {
+        "water_level": 50,
+        "probe_25": True,
+        "probe_50": True,
+        "probe_75": False,
+        "probe_100": False,
+        "alarm": False,
+        "muted": False,
+    }
+    res = client.post("/api/readings", json=payload, headers=AUTH_HEADERS_DEVICE)
+    assert res.status_code == 503
+    assert "ESP32_API_KEY is not configured" in res.json()["detail"]
+
+
+def test_readings_get_endpoints_remain_public():
+    """GET /api/readings/latest and /history must remain accessible without authentication headers."""
+    # When DB is empty or has items, latest returns 200 or 404, never 401 or 503 auth error
+    mock_session = MagicMock()
+    mock_query = MagicMock()
+    mock_session.query.return_value = mock_query
+    mock_query.order_by.return_value.first.return_value = None
+    mock_query.order_by.return_value.offset.return_value.limit.return_value.all.return_value = []
+
+    def override_get_db():
+        yield mock_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        # No X-Device-Key or X-Dashboard-Token header
+        res_latest = client.get("/api/readings/latest")
+        assert res_latest.status_code == 404
+
+        res_history = client.get("/api/readings/history")
+        assert res_history.status_code == 200
+        assert res_history.json() == []
+    finally:
+        app.dependency_overrides.clear()

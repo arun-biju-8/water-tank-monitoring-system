@@ -61,3 +61,5 @@ Thumbs.db
 *.bin
 
 docker-compose.local-test.yml
+
+esp32/water_tank_esp32/

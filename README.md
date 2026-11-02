@@ -86,7 +86,7 @@ graph TD
 2. **ESP32 Hardware Authentication (`ESP32_API_KEY`)**:
    - Pre-shared secret configured in `esp32/secrets.h` (`deviceApiKey`).
    - Transmitted in the `X-Device-Key` HTTPS header.
-   - Enforced on all command polling and acknowledgement endpoints.
+   - Enforced on telemetry ingestion (POST /api/readings) as well as command polling and acknowledgement endpoints.
 3. **Production Bypass Immunity**:
    - In production (`ENVIRONMENT=production` or running on Render), `ALLOW_INSECURE_DEV_AUTH` is strictly ignored and blocked.
 4. **Command Time-To-Live (TTL)**:
