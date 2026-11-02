@@ -254,11 +254,19 @@ void acknowledgeCloudCommand(int cmdId) {
     String ackBody = "{\"device_id\":\"esp32-tank-01\",\"status\":\"ACKNOWLEDGED\"}";
     int httpCode = http.POST(ackBody);
     if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_CREATED) {
-      Serial.printf("[Cloud] Command #%d confirmed & acknowledged successfully.\n", cmdId);
+      Serial.printf("[Commands] Command #%d acknowledged successfully (HTTP %d).\n", cmdId, httpCode);
+    } else if (httpCode == 401 || httpCode == 403) {
+      Serial.printf("[Commands] Failed to acknowledge command #%d: Authentication failure (HTTP %d).\n", cmdId, httpCode);
+    } else if (httpCode >= 500) {
+      Serial.printf("[Commands] Failed to acknowledge command #%d: Server error (HTTP %d).\n", cmdId, httpCode);
+    } else if (httpCode > 0) {
+      Serial.printf("[Commands] Failed to acknowledge command #%d: Server returned HTTP %d.\n", cmdId, httpCode);
     } else {
-      Serial.printf("[Cloud] Warning: Command ack returned HTTP %d\n", httpCode);
+      Serial.printf("[Commands] Failed to acknowledge command #%d: HTTPS connection failure (%s, code %d).\n", cmdId, http.errorToString(httpCode).c_str(), httpCode);
     }
     http.end();
+  } else {
+    Serial.printf("[Commands] Failed to acknowledge command #%d: Unable to establish TLS connection to ack endpoint.\n", cmdId);
   }
 }
 
@@ -280,41 +288,72 @@ void pollPendingCloudCommands() {
     int httpCode = http.GET();
     if (httpCode == HTTP_CODE_OK) {
       String response = http.getString();
-      // Check if command is present and is MUTE_ALARM
-      if (response.indexOf("\"command_type\":\"MUTE_ALARM\"") != -1) {
-        int idIdx = response.indexOf("\"id\":");
-        if (idIdx != -1) {
-          int start = idIdx + 5;
-          while (start < response.length() && (response[start] == ' ' || response[start] == ':')) start++;
-          int end = start;
-          while (end < response.length() && isDigit(response[end])) end++;
-          int cmdId = response.substring(start, end).toInt();
 
-          if (cmdId > 0) {
-            Serial.printf("[Cloud] Received remote command #%d: MUTE_ALARM\n", cmdId);
+      // Check if a pending command object is present
+      int idIdx = response.indexOf("\"id\":");
+      if (idIdx != -1) {
+        int start = idIdx + 5;
+        while (start < response.length() && (response[start] == ' ' || response[start] == ':')) start++;
+        int end = start;
+        while (end < response.length() && isDigit(response[end])) end++;
+        int cmdId = response.substring(start, end).toInt();
 
+        // Extract command_type
+        String cmdType = "UNKNOWN";
+        int typeIdx = response.indexOf("\"command_type\":");
+        if (typeIdx != -1) {
+          int tStart = typeIdx + 15;
+          while (tStart < response.length() && (response[tStart] == ' ' || response[tStart] == ':' || response[tStart] == '"')) tStart++;
+          int tEnd = tStart;
+          while (tEnd < response.length() && response[tEnd] != '"' && response[tEnd] != ',' && response[tEnd] != '}') tEnd++;
+          cmdType = response.substring(tStart, tEnd);
+        }
+
+        if (cmdId > 0) {
+          Serial.printf("[Commands] Pending command received — ID: #%d, Type: %s\n", cmdId, cmdType.c_str());
+
+          if (cmdType == "MUTE_ALARM") {
             // Only silence buzzer if alarm is currently active (level 0% or 100%)
             // Prevents reconnected ESP32 from muting future alarms
             if (alarmActive()) {
               buzzerMuted = true;
               digitalWrite(buzzerPin, LOW);
               updateTelemetrySnapshot(true);
-              Serial.println("[Cloud] Physical buzzer on GPIO 23 silenced.");
+              Serial.println("[Commands] Physical buzzer on GPIO 23 silenced.");
             } else {
-              Serial.println("[Cloud] Alarm is not active; command acknowledged without muting future alarms.");
+              Serial.println("[Commands] Alarm is not active; command acknowledged without muting future alarms.");
             }
-
-            // Send acknowledgment back to cloud to clear command
-            acknowledgeCloudCommand(cmdId);
+          } else {
+            Serial.printf("[Commands] Unhandled command type '%s' (acknowledging to clear).\n", cmdType.c_str());
           }
+
+          // Send acknowledgment back to cloud to clear command
+          acknowledgeCloudCommand(cmdId);
+        } else {
+          Serial.println("[Commands] Polled cloud: No pending commands.");
         }
+      } else {
+        // Successful poll with no pending commands
+        Serial.println("[Commands] Polled cloud: No pending commands.");
       }
+    } else if (httpCode == 401 || httpCode == 403) {
+      Serial.printf("[Commands] Authentication failure (HTTP %d): Invalid or missing X-Device-Key.\n", httpCode);
+    } else if (httpCode >= 500) {
+      Serial.printf("[Commands] Server error (HTTP %d): Backend service or database issue.\n", httpCode);
+    } else if (httpCode > 0) {
+      Serial.printf("[Commands] Poll returned unexpected HTTP status: %d\n", httpCode);
+    } else {
+      Serial.printf("[Commands] HTTPS connection failure during poll: %s (code %d)\n", http.errorToString(httpCode).c_str(), httpCode);
     }
     http.end();
+  } else {
+    Serial.println("[Commands] HTTPS connection failure: Unable to establish TLS connection to poll endpoint.");
   }
 }
 
 void cloudSyncTask(void* pvParameters) {
+  Serial.println("[FreeRTOS] CloudSyncTask started execution on Core 0.");
+
   TankTelemetry localTelemetry;
   unsigned long lastSendTime = 0;
   unsigned long lastCommandPoll = 0;
@@ -388,16 +427,27 @@ void cloudSyncTask(void* pvParameters) {
 
     if (http.begin(client, cloudEndpoint)) {
       http.addHeader("Content-Type", "application/json");
+      #ifdef SECRETS_H
+      if (String(deviceApiKey).length() > 0) {
+        http.addHeader("X-Device-Key", deviceApiKey);
+      }
+      #endif
 
       int httpCode = http.POST(payload);
       if (httpCode == HTTP_CODE_CREATED || httpCode == HTTP_CODE_OK) {
-        // Success
-      } else {
+        // Success: Telemetry successfully persisted
+      } else if (httpCode == 401 || httpCode == 403) {
+        Serial.printf("[Cloud] Telemetry authentication failure (HTTP %d): Check deviceApiKey.\n", httpCode);
+      } else if (httpCode >= 500) {
+        Serial.printf("[Cloud] Telemetry server error (HTTP %d): Backend service or database issue.\n", httpCode);
+      } else if (httpCode > 0) {
         Serial.printf("[Cloud] Warning: Server returned non-2xx status (%d)\n", httpCode);
+      } else {
+        Serial.printf("[Cloud] HTTPS connection failure during telemetry upload: %s (code %d)\n", http.errorToString(httpCode).c_str(), httpCode);
       }
       http.end();
     } else {
-      Serial.println("[Cloud] Error: Unable to connect to host");
+      Serial.println("[Cloud] Error: Unable to establish TLS connection to telemetry endpoint.");
     }
 
     lastSendTime = millis();
@@ -448,7 +498,7 @@ void setup() {
   server.begin();
 
   // Launch FreeRTOS background task on Core 0 for non-blocking cloud HTTPS communication & command polling
-  xTaskCreatePinnedToCore(
+  BaseType_t taskStatus = xTaskCreatePinnedToCore(
     cloudSyncTask,      // Task function
     "CloudSyncTask",    // Task name
     10240,              // Stack depth (bytes, sufficient for TLS handshake)
@@ -458,8 +508,11 @@ void setup() {
     0                   // Pin to Core 0 (main Arduino loop runs on Core 1)
   );
 
-  if (cloudTaskHandle != NULL) {
+  if (taskStatus == pdPASS && cloudTaskHandle != NULL) {
+    Serial.println("[FreeRTOS] CloudSyncTask created successfully on Core 0.");
     xTaskNotifyGive(cloudTaskHandle);
+  } else {
+    Serial.printf("[FreeRTOS] ERROR: Failed to create CloudSyncTask (return code: %d)!\n", (int)taskStatus);
   }
 }
 

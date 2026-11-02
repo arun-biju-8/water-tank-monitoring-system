@@ -52,10 +52,16 @@
             <span>REALTIME LEVEL</span>
           </button>
 
-          <!-- Connection Status Pill -->
-          <div id="connectionPill" class="status-pill pill-connecting" title="Checking Render Cloud API connectivity">
+          <!-- Backend Connection Status Pill -->
+          <div id="connectionPill" class="status-pill pill-connecting" title="FastAPI Cloud Backend connectivity">
             <span class="status-dot"></span>
-            <span id="connectionText" class="status-text">Connecting...</span>
+            <span id="connectionText" class="status-text">Backend Connecting...</span>
+          </div>
+
+          <!-- ESP32 Device Connection Status Pill -->
+          <div id="devicePill" class="status-pill pill-offline" title="ESP32 hardware live connection status (Online when telemetry <= 30s)">
+            <span class="status-dot"></span>
+            <span id="deviceText" class="status-text">ESP32 Offline</span>
           </div>
 
           <!-- Refresh Control -->

@@ -19,11 +19,19 @@
   // 1. Cloud API Configuration & Endpoints
   // ============================================================================
   const CLOUD_API_BASE = "https://tankpulse-2sq4.onrender.com";
+  const LOCAL_API_BASE = "http://localhost:8001";
 
-  // Use the cloud base URL unless running from the same origin on Render
-  const API_BASE = window.location.origin.includes("onrender.com")
-    ? window.location.origin
-    : CLOUD_API_BASE;
+  const isLocalEnvironment =
+    window.location.hostname === "localhost" ||
+    window.location.hostname === "127.0.0.1";
+
+  const API_BASE = isLocalEnvironment
+    ? LOCAL_API_BASE
+    : window.location.origin.includes("onrender.com")
+      ? window.location.origin
+      : CLOUD_API_BASE;
+
+  console.log("[TankPulse] API Base:", API_BASE);
 
   const ENDPOINTS = {
     latest: `${API_BASE}/api/readings/latest`,
@@ -35,6 +43,7 @@
   };
 
   const REFRESH_INTERVAL_MS = 5000; // Auto-refresh telemetry every 5 seconds
+  const FRESHNESS_THRESHOLD_SECONDS = 30; // ESP32 online only if reading <= 30s
   const STORAGE_KEY_TOKEN = "tankpulse_operator_token";
 
   // ============================================================================
@@ -46,7 +55,8 @@
     history: [],
     commandHistory: [],
     activeFilter: "all",
-    isConnected: false,
+    isBackendConnected: false,
+    isDeviceOnline: false,
     lastSuccessfulFetch: null,
     fetchInFlight: false,
     countdownSeconds: 5,
@@ -65,6 +75,8 @@
     btnOpenTimeline: document.getElementById("btnOpenTimeline"),
     connectionPill: document.getElementById("connectionPill"),
     connectionText: document.getElementById("connectionText"),
+    devicePill: document.getElementById("devicePill"),
+    deviceText: document.getElementById("deviceText"),
     btnManualRefresh: document.getElementById("btnManualRefresh"),
     refreshCircle: document.getElementById("refreshCircle"),
     countdownText: document.getElementById("countdownText"),
@@ -228,6 +240,107 @@
     if (level === 75) return { label: "Normal", badgeClass: "badge-normal", desc: "Optimal water capacity (75%)" };
     if (level === 100) return { label: "Full", badgeClass: "badge-full", desc: "Tank is 100% full (Overfill Warning)" };
     return { label: `${level}%`, badgeClass: "badge-medium", desc: `Water at ${level}% capacity` };
+  }
+
+  /**
+   * Updates the Backend Connection Status pill in the header.
+   */
+  function setBackendStatus(status, text) {
+    if (!el.connectionPill || !el.connectionText) return;
+    el.connectionPill.className = `status-pill pill-${status}`;
+    el.connectionText.textContent = text;
+  }
+
+  /**
+   * Updates the ESP32 Device Connection Status pill in the header.
+   */
+  function setDeviceStatus(status, text) {
+    if (!el.devicePill || !el.deviceText) return;
+    const pillClass = (status === "online" || status === "connected") ? "pill-connected" : "pill-offline";
+    el.devicePill.className = `status-pill ${pillClass}`;
+    el.deviceText.textContent = text;
+  }
+
+  /**
+   * Shows global toast/banner with message and icon.
+   */
+  function showAlertBanner(heading, detail, icon = "⚠️") {
+    if (!el.alertBanner) return;
+    if (el.alertHeading) el.alertHeading.textContent = heading;
+    if (el.alertDetail) el.alertDetail.textContent = detail;
+    if (el.alertIcon) el.alertIcon.textContent = icon;
+    el.alertBanner.classList.remove("hidden");
+  }
+
+  /**
+   * Hides global toast/banner.
+   */
+  function hideAlertBanner() {
+    if (!el.alertBanner) return;
+    el.alertBanner.classList.add("hidden");
+  }
+
+  /**
+   * Evaluates ESP32 hardware online/offline status based on latest reading timestamp.
+   * Considers ESP32 ONLINE only when latest reading is <= 30 seconds old.
+   * When > 30s old, marks ESP32 OFFLINE and labels telemetry as last known (stale).
+   */
+  function recalculateDeviceFreshness() {
+    if (!state.latestReading) {
+      state.isDeviceOnline = false;
+      setDeviceStatus("offline", "ESP32 Offline");
+      if (el.hardwareLinkStatus) {
+        el.hardwareLinkStatus.className = "meta-value status-badge badge-offline";
+        el.hardwareLinkStatus.textContent = "ESP32 Offline";
+      }
+      return;
+    }
+
+    const readingTime = new Date(state.latestReading.created_at).getTime();
+    if (isNaN(readingTime)) {
+      state.isDeviceOnline = false;
+      setDeviceStatus("offline", "ESP32 Offline");
+      return;
+    }
+
+    const ageSeconds = Math.max(0, Math.floor((Date.now() - readingTime) / 1000));
+    const isOnline = ageSeconds <= FRESHNESS_THRESHOLD_SECONDS;
+    state.isDeviceOnline = isOnline;
+
+    const relTimeStr = formatRelativeTime(state.latestReading.created_at);
+
+    if (isOnline) {
+      setDeviceStatus("online", "ESP32 Online");
+      if (el.hardwareLinkStatus) {
+        el.hardwareLinkStatus.className = "meta-value status-badge badge-online";
+        el.hardwareLinkStatus.textContent = "ESP32 Online";
+      }
+      if (el.relativeTime) {
+        el.relativeTime.textContent = relTimeStr;
+      }
+    } else {
+      // Stale telemetry: ESP32 is offline!
+      setDeviceStatus("offline", "ESP32 Offline");
+      if (el.hardwareLinkStatus) {
+        el.hardwareLinkStatus.className = "meta-value status-badge badge-stale";
+        el.hardwareLinkStatus.textContent = "ESP32 Offline";
+      }
+      if (el.heroStatusText) {
+        el.heroStatusText.textContent = `Last known reading — not live (${relTimeStr})`;
+      }
+      if (el.trendBadge) {
+        el.trendBadge.className = "trend-badge trend-stale";
+        el.trendBadge.textContent = "Not Live ⏸";
+      }
+      if (el.levelConditionBadge) {
+        const cond = getLevelCondition(state.latestReading.water_level);
+        el.levelConditionBadge.className = "condition-badge badge-stale";
+        el.levelConditionBadge.textContent = `${cond.label} (Stale)`;
+      }
+      if (el.relativeTime) {
+        el.relativeTime.textContent = `Last reading: ${relTimeStr}`;
+      }
+    }
   }
 
   // ============================================================================
@@ -537,7 +650,7 @@
             clearInterval(pollInterval);
             state.commandInFlight = false;
             setCommandFeedback(`Success: ESP32 acknowledged command #${commandId}. Physical buzzer silenced!`);
-            
+
             // Immediately refresh telemetry to sync dashboard
             fetchTelemetry();
             return;
@@ -603,8 +716,8 @@
           type: "level",
           icon: increased ? "📈" : "📉",
           class: increased ? "item-water-up" : "item-water-down",
-          headline: increased 
-            ? `Water level increased to ${current.water_level}%` 
+          headline: increased
+            ? `Water level increased to ${current.water_level}%`
             : `Water level decreased to ${current.water_level}%`,
           detail: `Transitioned from ${prev.water_level}% to ${current.water_level}% capacity`,
           time: current.created_at,
@@ -759,52 +872,124 @@
   // ============================================================================
 
   /**
+   * Renders empty state when database has no records (e.g. initial setup / empty table).
+   * Displays "--%", "Waiting for first ESP32 reading", and sets ESP32 Offline.
+   */
+  function renderEmptyDatabaseState() {
+    state.latestReading = null;
+    state.previousReading = null;
+    state.isDeviceOnline = false;
+
+    // 1. Hero Percentage & Subtitle
+    el.heroPercentage.textContent = "--";
+    el.heroStatusText.textContent = "Waiting for first ESP32 reading";
+    el.levelConditionBadge.textContent = "No Telemetry";
+    el.levelConditionBadge.className = "condition-badge badge-neutral";
+    el.trendBadge.className = "trend-badge trend-stable";
+    el.trendBadge.textContent = "Awaiting Data";
+
+    // 2. Metadata
+    el.timestampIST.textContent = "--:--:-- IST";
+    el.relativeTime.textContent = "Awaiting first reading";
+    el.readingId.textContent = "#--";
+    el.hardwareLinkStatus.className = "meta-value status-badge badge-offline";
+    el.hardwareLinkStatus.textContent = "ESP32 Offline";
+
+    // 3. Probes: reset all to Empty
+    updateProbeElement(el.probeCard25, el.probeState25, false);
+    updateProbeElement(el.probeCard50, el.probeState50, false);
+    updateProbeElement(el.probeCard75, el.probeState75, false);
+    updateProbeElement(el.probeCard100, el.probeState100, false);
+
+    // 4. Mute status badge
+    el.muteStatusBadge.className = "status-pill-badge badge-muted-off";
+    el.muteStatusBadge.textContent = "Awaiting Telemetry";
+    el.buzzerPhysicalStateDesc.textContent = "Hardware buzzer state pending initial ESP32 telemetry";
+
+    // 5. Silence alarm hero & button
+    updateAlarmControlUI();
+
+    // 6. Turn off simulated LEDs
+    const leds = [el.led1, el.led2, el.led3, el.led4, el.led5];
+    leds.forEach(l => { if (l) l.classList.remove("on", "blink"); });
+
+    // 7. Reset canvas interpolation target
+    state.visualLevel = 0;
+
+    // 8. Connection status: Backend is connected, ESP32 is offline
+    setBackendStatus("connected", "Backend Connected");
+    setDeviceStatus("offline", "ESP32 Offline");
+  }
+
+  /**
    * Updates all DOM elements with the latest reading payload.
+   * Accurately distinguishes live telemetry (<= 30s) from stale telemetry (> 30s).
    */
   function renderLatestReading(reading) {
-    if (!reading) return;
+    if (!reading) {
+      renderEmptyDatabaseState();
+      return;
+    }
 
     const level = reading.water_level;
     const condition = getLevelCondition(level);
 
-    // 1. Hero Percentage & Condition
+    // 1. Hero Percentage (Preserve last known water level!)
     el.heroPercentage.textContent = level;
-    el.heroStatusText.textContent = condition.desc;
-    el.levelConditionBadge.textContent = condition.label;
-    el.levelConditionBadge.className = `condition-badge ${condition.badgeClass}`;
 
-    // 2. Trend Badge (Filling, Draining, or Stable)
-    if (state.previousReading) {
-      const prevLevel = state.previousReading.water_level;
-      if (level > prevLevel) {
-        el.trendBadge.className = "trend-badge trend-filling";
-        el.trendBadge.textContent = "Filling up ↑";
-      } else if (level < prevLevel) {
-        el.trendBadge.className = "trend-badge trend-draining";
-        el.trendBadge.textContent = "Draining ↓";
+    // 2. Check Freshness (30-second window)
+    const readingTime = new Date(reading.created_at).getTime();
+    const ageSeconds = Math.max(0, Math.floor((Date.now() - readingTime) / 1000));
+    const isLive = ageSeconds <= FRESHNESS_THRESHOLD_SECONDS;
+    state.isDeviceOnline = isLive;
+
+    if (isLive) {
+      el.heroStatusText.textContent = condition.desc;
+      el.levelConditionBadge.textContent = condition.label;
+      el.levelConditionBadge.className = `condition-badge ${condition.badgeClass}`;
+
+      // Trend Badge (Filling, Draining, or Stable)
+      if (state.previousReading) {
+        const prevLevel = state.previousReading.water_level;
+        if (level > prevLevel) {
+          el.trendBadge.className = "trend-badge trend-filling";
+          el.trendBadge.textContent = "Filling up ↑";
+        } else if (level < prevLevel) {
+          el.trendBadge.className = "trend-badge trend-draining";
+          el.trendBadge.textContent = "Draining ↓";
+        } else {
+          el.trendBadge.className = "trend-badge trend-stable";
+          el.trendBadge.textContent = "Level Stable ↔";
+        }
       } else {
         el.trendBadge.className = "trend-badge trend-stable";
         el.trendBadge.textContent = "Level Stable ↔";
       }
-    }
 
-    // 3. Metadata: IST Timestamp, Relative Time, ID
-    el.timestampIST.textContent = formatIST(reading.created_at);
-    el.relativeTime.textContent = formatRelativeTime(reading.created_at);
-    el.readingId.textContent = `#${reading.id}`;
-
-    // 4. Hardware Freshness Check (ESP32 online if reading is within 45s)
-    const readingTime = new Date(reading.created_at).getTime();
-    const ageSeconds = Math.floor((Date.now() - readingTime) / 1000);
-    const isRecent = ageSeconds < 45;
-
-    if (isRecent) {
+      setDeviceStatus("online", "ESP32 Online");
       el.hardwareLinkStatus.className = "meta-value status-badge badge-online";
-      el.hardwareLinkStatus.textContent = "ESP32 Online (Live)";
+      el.hardwareLinkStatus.textContent = "ESP32 Online";
+      el.relativeTime.textContent = formatRelativeTime(reading.created_at);
+
     } else {
+      // STALE TELEMETRY (>30 seconds)
+      // Requirement 4: Clearly label it "Last known reading — not live". Display actual age.
+      el.heroStatusText.textContent = `Last known reading — not live (${formatRelativeTime(reading.created_at)})`;
+      el.levelConditionBadge.textContent = `${condition.label} (Stale)`;
+      el.levelConditionBadge.className = "condition-badge badge-stale";
+
+      el.trendBadge.className = "trend-badge trend-stale";
+      el.trendBadge.textContent = "Not Live ⏸";
+
+      setDeviceStatus("offline", "ESP32 Offline");
       el.hardwareLinkStatus.className = "meta-value status-badge badge-stale";
-      el.hardwareLinkStatus.textContent = `Telemetry Stale (${formatRelativeTime(reading.created_at)})`;
+      el.hardwareLinkStatus.textContent = "ESP32 Offline";
+      el.relativeTime.textContent = `Last reading: ${formatRelativeTime(reading.created_at)}`;
     }
+
+    // 3. Metadata: IST Timestamp, ID
+    el.timestampIST.textContent = formatIST(reading.created_at);
+    el.readingId.textContent = `#${reading.id}`;
 
     // 5. Probes Status (Strictly "Filled" and "Empty")
     updateProbeElement(el.probeCard25, el.probeState25, reading.probe_25);
@@ -875,7 +1060,7 @@
       const isAlarm = Boolean(r.alarm);
       const isMuted = Boolean(r.muted);
 
-      const probePill = (filled, label) => 
+      const probePill = (filled, label) =>
         `<span class="table-probe-pill ${filled ? "filled" : "empty"}">${label}: ${filled ? "Filled" : "Empty"}</span>`;
 
       return `
@@ -1026,6 +1211,12 @@
     state.fetchInFlight = true;
 
     try {
+      // 1. Concurrently query Health probe, Latest Telemetry, History, Command History
+      const healthPromise = fetch(ENDPOINTS.health, {
+        cache: "no-store",
+        headers: { "Accept": "application/json" }
+      });
+
       const latestPromise = fetch(ENDPOINTS.latest, {
         cache: "no-store",
         headers: { "Accept": "application/json" }
@@ -1034,57 +1225,113 @@
       const historyPromise = fetch(ENDPOINTS.history, {
         cache: "no-store",
         headers: { "Accept": "application/json" }
-      });
+      }).catch(() => null);
 
       const commandHistoryPromise = fetch(ENDPOINTS.commandHistory, {
         cache: "no-store",
         headers: { "Accept": "application/json" }
       }).catch(() => null);
 
-      const [latestRes, historyRes, cmdHistRes] = await Promise.all([
+      const [healthRes, latestRes, historyRes, cmdHistRes] = await Promise.all([
+        healthPromise,
         latestPromise,
         historyPromise,
         commandHistoryPromise
       ]);
 
-      if (!latestRes.ok) {
+      // 2. BACKEND HEALTH CHECK: Must not imply that ESP32 is online
+      if (healthRes.ok) {
+        state.isBackendConnected = true;
+        state.consecutiveErrors = 0;
+        setBackendStatus("connected", "Backend Connected");
+      } else {
+        throw new Error(`Cloud API health probe returned HTTP ${healthRes.status}`);
+      }
+
+      // 3. LATEST TELEMETRY EVALUATION
+      if (latestRes.status === 200) {
+        const latestData = await latestRes.json();
+        state.previousReading = state.latestReading;
+        state.latestReading = latestData;
+        renderLatestReading(latestData);
+        hideAlertBanner();
+
+      } else if (latestRes.status === 404) {
+        // Expected empty database state ("No water level readings have been recorded yet.")
+        // Do NOT show an API Connection Error for this case.
+        renderEmptyDatabaseState();
+        hideAlertBanner();
+
+      } else if (latestRes.status === 401 || latestRes.status === 403) {
+        console.warn("[TankPulse] Telemetry request unauthorized.");
+        showAlertBanner(
+          "Authentication Required",
+          "Backend requires authorization to access telemetry.",
+          "🔒"
+        );
+      } else if (latestRes.status >= 500) {
+        console.warn(`[TankPulse] Backend service degraded (HTTP ${latestRes.status}).`);
+        showAlertBanner(
+          "Backend Service Degraded",
+          `Render database or backend service returned HTTP ${latestRes.status}.`,
+          "⚠️"
+        );
+      } else {
         throw new Error(`Cloud API returned HTTP ${latestRes.status}`);
       }
 
-      const latestData = await latestRes.json();
-      state.previousReading = state.latestReading;
-      state.latestReading = latestData;
-      renderLatestReading(latestData);
-
-      if (historyRes.ok) {
+      // 4. HISTORICAL READINGS
+      if (historyRes && historyRes.ok) {
         const historyData = await historyRes.json();
         state.history = Array.isArray(historyData) ? historyData : [];
         renderHistoryTable(state.history);
         renderHistoryChart(state.history);
+      } else if (latestRes.status === 404) {
+        state.history = [];
+        renderHistoryTable([]);
       }
 
+      // 5. COMMAND HISTORY
       if (cmdHistRes && cmdHistRes.ok) {
         const cmdData = await cmdHistRes.json();
         state.commandHistory = Array.isArray(cmdData) ? cmdData : [];
       }
 
-      // Update Timeline modal if open
+      // 6. TIMELINE MODAL SYNC
       if (el.timelineModal && !el.timelineModal.classList.contains("hidden")) {
         renderTimeline();
       }
 
-      state.isConnected = true;
-      state.consecutiveErrors = 0;
       state.lastSuccessfulFetch = new Date();
-      updateConnectionStatus("connected", "Connected (Render Cloud API)");
 
     } catch (err) {
-      console.warn("[TankPulse] Error fetching cloud telemetry:", err.message);
+      console.warn("[TankPulse] Backend connection failure:", err.message);
       state.consecutiveErrors++;
+      state.isBackendConnected = false;
+      state.isDeviceOnline = false;
+
+      setBackendStatus("error", "Backend Disconnected");
+      setDeviceStatus("offline", "ESP32 Offline");
+
+      if (el.hardwareLinkStatus) {
+        el.hardwareLinkStatus.className = "meta-value status-badge badge-offline";
+        el.hardwareLinkStatus.textContent = "ESP32 Offline";
+      }
+
+      // Preserve stale telemetry if previous reading exists
+      if (state.latestReading) {
+        recalculateDeviceFreshness();
+      } else {
+        el.heroPercentage.textContent = "--";
+        el.heroStatusText.textContent = "Backend Disconnected — Reconnecting...";
+      }
 
       if (state.consecutiveErrors >= 2) {
-        state.isConnected = false;
-        updateConnectionStatus("error", `API Connection Error (${err.message})`);
+        showAlertBanner(
+          "Backend Disconnected",
+          `Cannot communicate with Render cloud API (${err.message}). Live telemetry paused.`,
+          "🔌"
+        );
       }
     } finally {
       state.fetchInFlight = false;
@@ -1093,9 +1340,7 @@
   }
 
   function updateConnectionStatus(status, text) {
-    if (!el.connectionPill || !el.connectionText) return;
-    el.connectionPill.className = `status-pill pill-${status}`;
-    el.connectionText.textContent = text;
+    setBackendStatus(status, text);
   }
 
   // ============================================================================
@@ -1127,9 +1372,8 @@
         updateCountdownUI();
       }
 
-      if (state.latestReading) {
-        el.relativeTime.textContent = formatRelativeTime(state.latestReading.created_at);
-      }
+      // Recalculate ESP32 hardware freshness every 1 second
+      recalculateDeviceFreshness();
     }, 1000);
 
     if (refreshTimer) clearInterval(refreshTimer);
