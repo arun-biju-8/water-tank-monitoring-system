@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from ..database import get_db
 from .. import schemas, crud
+from ..auth import _verify_esp32_auth
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,8 @@ router = APIRouter(
 )
 def create_sensor_reading(
     reading: schemas.WaterReadingCreate,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _auth: bool = Depends(_verify_esp32_auth)
 ):
     """
     Receives JSON payload from ESP32, validates the structure and values,

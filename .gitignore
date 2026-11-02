@@ -9,6 +9,7 @@ backend/.env.*
 !backend/.env.example
 
 esp32/secrets.h
+**/secrets.h
 !esp32/secrets.example.h
 
 # Python artifacts
@@ -58,3 +59,7 @@ Thumbs.db
 *.hex
 *.elf
 *.bin
+
+docker-compose.local-test.yml
+
+esp32/water_tank_esp32/

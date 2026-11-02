@@ -97,5 +97,82 @@ class HealthResponse(BaseModel):
     """
     status: str = Field(..., description="System overall health status", examples=["ok", "degraded"])
     database: str = Field(..., description="Database connection status", examples=["connected", "disconnected"])
-    timestamp: datetime = Field(default_factory=datetime.utcnow, description="Server UTC timestamp")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), description="Server UTC timestamp")
     detail: Optional[str] = Field(default=None, description="Optional diagnostic details")
+
+
+# ==============================================================================
+# Device Command Schemas for Bidirectional Buzzer Control
+# ==============================================================================
+
+class MuteCommandRequest(BaseModel):
+    """Request payload sent from dashboard to silence physical alarm."""
+    device_id: str = Field(
+        default="esp32-tank-01",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-zA-Z0-9_\-]+$",
+        description="Target hardware device ID"
+    )
+
+    @field_validator("device_id")
+    @classmethod
+    def validate_device_id(cls, v: str) -> str:
+        s = v.strip()
+        if not s:
+            raise ValueError("device_id cannot be empty or whitespace")
+        return s
+
+
+class CommandAckRequest(BaseModel):
+    """Acknowledgment payload sent by ESP32 once physical buzzer is silenced."""
+    device_id: str = Field(
+        default="esp32-tank-01",
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-zA-Z0-9_\-]+$",
+        description="Device ID confirming execution"
+    )
+    status: str = Field(
+        default="ACKNOWLEDGED",
+        description="Confirmation status (must be ACKNOWLEDGED)"
+    )
+
+    @field_validator("device_id")
+    @classmethod
+    def validate_device_id(cls, v: str) -> str:
+        s = v.strip()
+        if not s:
+            raise ValueError("device_id cannot be empty or whitespace")
+        return s
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        s = v.strip()
+        if s != "ACKNOWLEDGED":
+            raise ValueError("status must be ACKNOWLEDGED")
+        return s
+
+
+class CommandResponse(BaseModel):
+    """Serialized command object returned to dashboard and ESP32."""
+    id: int = Field(..., description="Unique command ID")
+    device_id: str = Field(..., min_length=1, max_length=64, description="Target device identifier")
+    command_type: str = Field(..., pattern=r"^(MUTE_ALARM|UNMUTE_ALARM)$", description="Command type (e.g. MUTE_ALARM)")
+    command_status: str = Field(..., pattern=r"^(PENDING|ACKNOWLEDGED|EXPIRED)$", description="Status: PENDING, ACKNOWLEDGED, EXPIRED")
+    created_at: datetime = Field(..., description="Timestamp created (IST, UTC+05:30)")
+    acknowledged_at: Optional[datetime] = Field(default=None, description="Timestamp acknowledged by ESP32 (IST, UTC+05:30)")
+
+    model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("created_at", "acknowledged_at", mode="after")
+    @classmethod
+    def convert_command_timestamps_to_ist(cls, v: Optional[datetime]) -> Optional[datetime]:
+        return to_ist(v)
+
+
+class PendingCommandResponse(BaseModel):
+    """Polling response format for ESP32 microcontroller."""
+    command: Optional[CommandResponse] = Field(default=None, description="Pending command object, if any")
+    message: Optional[str] = Field(default=None, description="Status description")

@@ -1,0 +1,219 @@
+"""
+API routes for bidirectional device command execution (Remote Buzzer Mute Control).
+Provides authenticated endpoints for dashboard operators and ESP32 microcontrollers.
+"""
+
+import os
+import hmac
+import logging
+from typing import List, Optional
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
+
+from ..database import get_db
+from .. import schemas, crud
+from ..auth import _verify_dashboard_auth, _verify_esp32_auth
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(
+    prefix="/api/commands",
+    tags=["Commands"]
+)
+
+
+
+@router.post(
+    "/mute",
+    response_model=schemas.CommandResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Request alarm mute",
+    description="Issued by authorized dashboard operator to silence physical buzzer on GPIO 23."
+)
+def request_alarm_mute(
+    payload: Optional[schemas.MuteCommandRequest] = None,
+    db: Session = Depends(get_db),
+    _auth: bool = Depends(_verify_dashboard_auth)
+):
+    """
+    Creates a new MUTE_ALARM command record in PostgreSQL with PENDING status.
+    Deduplicates requests if an active pending command is already in flight.
+    """
+    target_device = (payload.device_id if payload and payload.device_id else "esp32-tank-01").strip()
+    try:
+        cmd = crud.create_mute_command(db=db, device_id=target_device)
+        logger.info("MUTE_ALARM command #%d prepared for device '%s' (status: %s)", cmd.id, target_device, cmd.command_status)
+        return cmd
+    except SQLAlchemyError as exc:
+        logger.error("Database error while creating mute command: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database error: Could not schedule mute command."
+        )
+
+
+@router.get(
+    "/pending",
+    response_model=schemas.PendingCommandResponse,
+    summary="Poll pending commands (ESP32)",
+    description="Endpoint polled by ESP32 to receive pending hardware instructions."
+)
+def get_pending_commands_for_device(
+    device_id: str = Query("esp32-tank-01", min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_\-]+$", description="Device ID polling for commands"),
+    db: Session = Depends(get_db),
+    _auth: bool = Depends(_verify_esp32_auth)
+):
+    """
+    Returns the oldest valid (unexpired) pending command for the device.
+    Automatically expires stale commands exceeding TTL to prevent unexpected buzzer silencing.
+    """
+    clean_device = device_id.strip()
+    if not clean_device:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="device_id cannot be empty or whitespace."
+        )
+    try:
+        cmd = crud.get_pending_command(db=db, device_id=clean_device)
+        if cmd:
+            return schemas.PendingCommandResponse(command=cmd, message="Pending command available")
+        return schemas.PendingCommandResponse(command=None, message="No pending commands")
+    except SQLAlchemyError as exc:
+        logger.error("Database error while checking pending commands: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database error: Could not check pending commands."
+        )
+
+
+@router.post(
+    "/{command_id}/ack",
+    response_model=schemas.CommandResponse,
+    summary="Acknowledge command execution (ESP32)",
+    description="Called by ESP32 microcontroller after successfully silencing physical buzzer on GPIO 23."
+)
+def acknowledge_command_execution(
+    command_id: int,
+    payload: Optional[schemas.CommandAckRequest] = None,
+    db: Session = Depends(get_db),
+    _auth: bool = Depends(_verify_esp32_auth)
+):
+    """
+    Marks command status as ACKNOWLEDGED and records timestamp.
+    Enforces strict command ownership and rejects expired commands.
+    """
+    requesting_device = (payload.device_id if payload and payload.device_id else "esp32-tank-01").strip()
+    try:
+        # 1. Fetch command and verify existence
+        cmd = crud.get_command_by_id(db=db, command_id=command_id)
+        if not cmd:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Command #{command_id} not found."
+            )
+
+        # 2. Enforce strict device ownership
+        if cmd.device_id != requesting_device:
+            logger.warning(
+                "Command ownership mismatch: device '%s' attempted to acknowledge command #%d belonging to '%s'",
+                requesting_device, command_id, cmd.device_id
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Forbidden: Command #{command_id} was issued to device '{cmd.device_id}', not '{requesting_device}'."
+            )
+
+        # 3. Check for expired status or TTL expiration
+        from datetime import datetime, timezone, timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=crud.get_command_ttl_seconds())
+        cmd_created = cmd.created_at.replace(tzinfo=timezone.utc) if cmd.created_at and cmd.created_at.tzinfo is None else cmd.created_at
+        if cmd.command_status == "EXPIRED" or (cmd_created and cmd_created < cutoff):
+            if cmd.command_status != "EXPIRED":
+                crud.expire_stale_commands(db=db, device_id=requesting_device)
+            logger.warning("Attempted to acknowledge expired command #%d by device '%s'", command_id, requesting_device)
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail=f"Command #{command_id} has expired and cannot be acknowledged."
+            )
+
+        # 4. If already acknowledged, return idempotently
+        if cmd.command_status == "ACKNOWLEDGED":
+            return cmd
+
+        # 5. Mark acknowledged
+        updated_cmd = crud.acknowledge_command(db=db, command_id=command_id, device_id=requesting_device)
+        if not updated_cmd or updated_cmd.command_status != "ACKNOWLEDGED":
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail=f"Command #{command_id} could not be acknowledged (expired or invalid state)."
+            )
+        logger.info("Command #%d confirmed executed and acknowledged by device '%s'", command_id, requesting_device)
+        return updated_cmd
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        logger.error("Database error while acknowledging command: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database error: Could not acknowledge command."
+        )
+
+
+@router.get(
+    "/status/{command_id}",
+    response_model=schemas.CommandResponse,
+    summary="Get command status",
+    description="Polled by web dashboard to verify whether ESP32 has acknowledged buzzer mute."
+)
+def get_command_status(
+    command_id: int,
+    db: Session = Depends(get_db),
+    _auth: bool = Depends(_verify_dashboard_auth)
+):
+    """
+    Returns current status of a command (PENDING, ACKNOWLEDGED, or EXPIRED).
+    Protected by DASHBOARD_CONTROL_TOKEN authentication.
+    """
+    try:
+        cmd = crud.get_command_by_id(db=db, command_id=command_id)
+        if not cmd:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Command #{command_id} not found."
+            )
+        return cmd
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        logger.error("Database error while checking command status: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database error: Could not check command status."
+        )
+
+
+@router.get(
+    "/history",
+    response_model=List[schemas.CommandResponse],
+    summary="Get command history",
+    description="Retrieves recent command history for audit logging and timeline presentation."
+)
+def get_command_history(
+    device_id: Optional[str] = Query(None, description="Filter by device ID"),
+    limit: int = Query(20, ge=1, le=100, description="Max command history records"),
+    db: Session = Depends(get_db),
+    _auth: bool = Depends(_verify_dashboard_auth)
+):
+    """
+    Returns recent command events ordered newest first.
+    Protected by DASHBOARD_CONTROL_TOKEN authentication.
+    """
+    try:
+        return crud.get_command_history(db=db, device_id=device_id, limit=limit)
+    except SQLAlchemyError as exc:
+        logger.error("Database error while checking command history: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database error: Could not check command history."
+        )
