@@ -1,0 +1,37 @@
+# Environment and secret files (CRITICAL: Never bake credentials into Docker image)
+.env
+.env.*
+*.env
+
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Git and version control
+.git/
+.gitignore
+.gitattributes
+
+# IDE, OS, and editor files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Test suites and development utilities
+tests/
+test_db_connection.py

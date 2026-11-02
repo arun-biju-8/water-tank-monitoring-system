@@ -1,0 +1,33 @@
+# Environment and secret files
+.env
+.env.*
+*.env
+backend/.env
+backend/.env.*
+
+# Python virtual environments
+.venv/
+venv/
+env/
+backend/.venv/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Git and repository metadata
+.git/
+.gitignore
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Non-backend workspace components
+esp32/
+frontend/
+documentation/
