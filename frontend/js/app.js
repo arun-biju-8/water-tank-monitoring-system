@@ -64,7 +64,8 @@
     visualLevel: 0, // Animated interpolation value for the canvas tank
     commandInFlight: false,
     pendingCommandId: null,
-    operatorToken: localStorage.getItem(STORAGE_KEY_TOKEN) || "",
+    operatorToken: (typeof sessionStorage !== "undefined" && sessionStorage.getItem(STORAGE_KEY_TOKEN)) ||
+                   (typeof localStorage !== "undefined" && localStorage.getItem(STORAGE_KEY_TOKEN)) || "",
   };
 
   // ============================================================================
@@ -639,10 +640,23 @@
     const pollInterval = setInterval(async () => {
       attempts++;
       try {
+        const headers = { "Accept": "application/json" };
+        if (state.operatorToken && state.operatorToken.trim()) {
+          headers["X-Dashboard-Token"] = state.operatorToken.trim();
+        }
+
         const res = await fetch(ENDPOINTS.commandStatus(commandId), {
           cache: "no-store",
-          headers: { "Accept": "application/json" }
+          headers: headers
         });
+
+        if (res.status === 401 || res.status === 403) {
+          clearInterval(pollInterval);
+          state.commandInFlight = false;
+          updateAlarmControlUI();
+          setCommandFeedback("Authorization required to verify command status.");
+          return;
+        }
 
         if (res.ok) {
           const cmd = await res.json();
@@ -854,17 +868,21 @@
     if (!el.inputOperatorToken) return;
     const val = el.inputOperatorToken.value.trim();
     state.operatorToken = val;
-    localStorage.setItem(STORAGE_KEY_TOKEN, val);
+    if (typeof sessionStorage !== "undefined") sessionStorage.setItem(STORAGE_KEY_TOKEN, val);
+    if (typeof localStorage !== "undefined") localStorage.setItem(STORAGE_KEY_TOKEN, val);
     closeSettingsModal();
     setCommandFeedback(val ? "Operator token saved in browser." : "Operator token cleared.");
+    fetchTelemetry();
   }
 
   function clearOperatorToken() {
     state.operatorToken = "";
-    localStorage.removeItem(STORAGE_KEY_TOKEN);
+    if (typeof sessionStorage !== "undefined") sessionStorage.removeItem(STORAGE_KEY_TOKEN);
+    if (typeof localStorage !== "undefined") localStorage.removeItem(STORAGE_KEY_TOKEN);
     if (el.inputOperatorToken) el.inputOperatorToken.value = "";
     closeSettingsModal();
     setCommandFeedback("Operator token cleared.");
+    fetchTelemetry();
   }
 
   // ============================================================================
@@ -1227,9 +1245,14 @@
         headers: { "Accept": "application/json" }
       }).catch(() => null);
 
+      const cmdHeaders = { "Accept": "application/json" };
+      if (state.operatorToken && state.operatorToken.trim()) {
+        cmdHeaders["X-Dashboard-Token"] = state.operatorToken.trim();
+      }
+
       const commandHistoryPromise = fetch(ENDPOINTS.commandHistory, {
         cache: "no-store",
-        headers: { "Accept": "application/json" }
+        headers: cmdHeaders
       }).catch(() => null);
 
       const [healthRes, latestRes, historyRes, cmdHistRes] = await Promise.all([
@@ -1295,6 +1318,8 @@
       if (cmdHistRes && cmdHistRes.ok) {
         const cmdData = await cmdHistRes.json();
         state.commandHistory = Array.isArray(cmdData) ? cmdData : [];
+      } else {
+        state.commandHistory = [];
       }
 
       // 6. TIMELINE MODAL SYNC

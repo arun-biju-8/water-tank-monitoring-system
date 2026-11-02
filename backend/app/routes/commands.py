@@ -134,7 +134,7 @@ def request_alarm_mute(
     description="Endpoint polled by ESP32 to receive pending hardware instructions."
 )
 def get_pending_commands_for_device(
-    device_id: str = Query("esp32-tank-01", description="Device ID polling for commands"),
+    device_id: str = Query("esp32-tank-01", min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_\-]+$", description="Device ID polling for commands"),
     db: Session = Depends(get_db),
     _auth: bool = Depends(_verify_esp32_auth)
 ):
@@ -142,8 +142,14 @@ def get_pending_commands_for_device(
     Returns the oldest valid (unexpired) pending command for the device.
     Automatically expires stale commands exceeding TTL to prevent unexpected buzzer silencing.
     """
+    clean_device = device_id.strip()
+    if not clean_device:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="device_id cannot be empty or whitespace."
+        )
     try:
-        cmd = crud.get_pending_command(db=db, device_id=device_id)
+        cmd = crud.get_pending_command(db=db, device_id=clean_device)
         if cmd:
             return schemas.PendingCommandResponse(command=cmd, message="Pending command available")
         return schemas.PendingCommandResponse(command=None, message="No pending commands")
@@ -192,16 +198,30 @@ def acknowledge_command_execution(
                 detail=f"Forbidden: Command #{command_id} was issued to device '{cmd.device_id}', not '{requesting_device}'."
             )
 
-        # 3. Reject acknowledgment of expired commands
-        if cmd.command_status == "EXPIRED":
+        # 3. Check for expired status or TTL expiration
+        from datetime import datetime, timezone, timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=crud.get_command_ttl_seconds())
+        cmd_created = cmd.created_at.replace(tzinfo=timezone.utc) if cmd.created_at and cmd.created_at.tzinfo is None else cmd.created_at
+        if cmd.command_status == "EXPIRED" or (cmd_created and cmd_created < cutoff):
+            if cmd.command_status != "EXPIRED":
+                crud.expire_stale_commands(db=db, device_id=requesting_device)
             logger.warning("Attempted to acknowledge expired command #%d by device '%s'", command_id, requesting_device)
             raise HTTPException(
                 status_code=status.HTTP_410_GONE,
                 detail=f"Command #{command_id} has expired and cannot be acknowledged."
             )
 
-        # 4. Mark acknowledged
+        # 4. If already acknowledged, return idempotently
+        if cmd.command_status == "ACKNOWLEDGED":
+            return cmd
+
+        # 5. Mark acknowledged
         updated_cmd = crud.acknowledge_command(db=db, command_id=command_id, device_id=requesting_device)
+        if not updated_cmd or updated_cmd.command_status != "ACKNOWLEDGED":
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail=f"Command #{command_id} could not be acknowledged (expired or invalid state)."
+            )
         logger.info("Command #%d confirmed executed and acknowledged by device '%s'", command_id, requesting_device)
         return updated_cmd
     except HTTPException:
@@ -222,10 +242,12 @@ def acknowledge_command_execution(
 )
 def get_command_status(
     command_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _auth: bool = Depends(_verify_dashboard_auth)
 ):
     """
     Returns current status of a command (PENDING, ACKNOWLEDGED, or EXPIRED).
+    Protected by DASHBOARD_CONTROL_TOKEN authentication.
     """
     try:
         cmd = crud.get_command_by_id(db=db, command_id=command_id)
@@ -254,10 +276,12 @@ def get_command_status(
 def get_command_history(
     device_id: Optional[str] = Query(None, description="Filter by device ID"),
     limit: int = Query(20, ge=1, le=100, description="Max command history records"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _auth: bool = Depends(_verify_dashboard_auth)
 ):
     """
     Returns recent command events ordered newest first.
+    Protected by DASHBOARD_CONTROL_TOKEN authentication.
     """
     try:
         return crud.get_command_history(db=db, device_id=device_id, limit=limit)

@@ -12,8 +12,21 @@ from . import models, schemas
 
 logger = logging.getLogger(__name__)
 
-# Command Time-To-Live: Commands older than 120s are expired to prevent stale execution
-COMMAND_TTL_SECONDS = int(os.getenv("COMMAND_TTL_SECONDS", "120"))
+def get_command_ttl_seconds() -> int:
+    """
+    Returns the command TTL in seconds (default: 120s).
+    Robust against invalid, non-numeric, or non-positive environment values.
+    """
+    raw = os.getenv("COMMAND_TTL_SECONDS", "120").strip()
+    try:
+        val = int(raw)
+        return val if val > 0 else 120
+    except (ValueError, TypeError):
+        return 120
+
+
+# Backward compatibility reference
+COMMAND_TTL_SECONDS = get_command_ttl_seconds()
 
 
 # ==============================================================================
@@ -82,7 +95,7 @@ def expire_stale_commands(db: Session, device_id: Optional[str] = None) -> int:
     Prevents stale commands from unexpectedly silencing the buzzer after reconnection.
     Returns the count of expired commands.
     """
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=COMMAND_TTL_SECONDS)
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=get_command_ttl_seconds())
     filters = [
         models.DeviceCommand.command_status == "PENDING",
         models.DeviceCommand.created_at < cutoff
@@ -159,6 +172,7 @@ def acknowledge_command(
     """
     Marks a command as ACKNOWLEDGED once executed by the intended ESP32 hardware.
     Enforces matching device_id ownership.
+    Ensures that expired commands cannot become acknowledged.
     """
     cmd = (
         db.query(models.DeviceCommand)
@@ -171,11 +185,23 @@ def acknowledge_command(
     if not cmd:
         return None
 
-    if cmd.command_status != "ACKNOWLEDGED":
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=get_command_ttl_seconds())
+    cmd_created = cmd.created_at.replace(tzinfo=timezone.utc) if cmd.created_at and cmd.created_at.tzinfo is None else cmd.created_at
+
+    # Reject if already expired or past TTL
+    if cmd.command_status == "EXPIRED" or (cmd_created and cmd_created < cutoff):
+        if cmd.command_status != "EXPIRED":
+            cmd.command_status = "EXPIRED"
+            db.commit()
+            db.refresh(cmd)
+        return cmd
+
+    if cmd.command_status == "PENDING":
         cmd.command_status = "ACKNOWLEDGED"
         cmd.acknowledged_at = func.now()
         db.commit()
         db.refresh(cmd)
+
     return cmd
 
 

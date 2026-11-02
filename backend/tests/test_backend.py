@@ -719,9 +719,10 @@ def test_esp32_ack_command_success(monkeypatch):
         app.dependency_overrides.clear()
 
 
-def test_get_command_status_and_history():
-    """Verify GET /api/commands/status/{id} and /api/commands/history."""
+def test_get_command_status_and_history(monkeypatch):
+    """Verify GET /api/commands/status/{id} and /api/commands/history enforce authentication."""
     from app.models import DeviceCommand
+    monkeypatch.setenv("DASHBOARD_CONTROL_TOKEN", "valid_test_token_123")
 
     fake_cmd = DeviceCommand(
         id=20,
@@ -743,11 +744,20 @@ def test_get_command_status_and_history():
 
     app.dependency_overrides[get_db] = override_get_db
     try:
-        res_status = client.get("/api/commands/status/20")
+        # Unauthorized without header -> 401
+        res_unauth = client.get("/api/commands/status/20")
+        assert res_unauth.status_code == 401
+
+        res_hist_unauth = client.get("/api/commands/history?limit=5")
+        assert res_hist_unauth.status_code == 401
+
+        # Authorized with valid header -> 200
+        headers = {"X-Dashboard-Token": "valid_test_token_123"}
+        res_status = client.get("/api/commands/status/20", headers=headers)
         assert res_status.status_code == 200
         assert res_status.json()["command_status"] == "ACKNOWLEDGED"
 
-        res_hist = client.get("/api/commands/history?limit=5")
+        res_hist = client.get("/api/commands/history?limit=5", headers=headers)
         assert res_hist.status_code == 200
         assert len(res_hist.json()) == 1
         assert res_hist.json()[0]["id"] == 20
@@ -942,3 +952,99 @@ def test_duplicate_mute_requests_deduplicated(monkeypatch):
         mock_session.add.assert_not_called()
     finally:
         app.dependency_overrides.clear()
+
+
+# ==============================================================================
+# 9. Extended Production Validation & Regression Tests
+# ==============================================================================
+
+def test_crud_create_reading_returns_model_instance():
+    """Verify crud.create_reading returns the created WaterReading model, not a count or scalar."""
+    from app import crud
+    from app.schemas import WaterReadingCreate
+    from app.models import WaterReading
+
+    payload = WaterReadingCreate(
+        water_level=50,
+        probe_25=True,
+        probe_50=True,
+        probe_75=False,
+        probe_100=False,
+        alarm=False,
+        muted=False
+    )
+
+    mock_session = MagicMock()
+    mock_session.add = MagicMock()
+    mock_session.commit = MagicMock()
+
+    def fake_refresh(instance):
+        instance.id = 42
+
+    mock_session.refresh = MagicMock(side_effect=fake_refresh)
+
+    result = crud.create_reading(db=mock_session, reading_in=payload)
+    assert isinstance(result, WaterReading)
+    assert result.id == 42
+    assert result.water_level == 50
+    assert result.probe_50 is True
+    assert mock_session.add.called
+    assert mock_session.commit.called
+    assert mock_session.refresh.called
+
+
+def test_device_id_validation_rejects_empty_and_whitespace():
+    """Verify empty, whitespace, or invalid device IDs are rejected by schemas."""
+    from app.schemas import MuteCommandRequest, CommandAckRequest
+
+    with pytest.raises(ValidationError):
+        MuteCommandRequest(device_id="")
+
+    with pytest.raises(ValidationError):
+        MuteCommandRequest(device_id="   ")
+
+    with pytest.raises(ValidationError):
+        CommandAckRequest(device_id="")
+
+    with pytest.raises(ValidationError):
+        CommandAckRequest(device_id="invalid device!@#")
+
+
+def test_invalid_ack_status_rejected():
+    """Verify acknowledgement request rejects invalid status values."""
+    from app.schemas import CommandAckRequest
+
+    with pytest.raises(ValidationError):
+        CommandAckRequest(device_id="esp32-tank-01", status="REJECTED")
+
+    # Valid status
+    valid = CommandAckRequest(device_id="esp32-tank-01", status="ACKNOWLEDGED")
+    assert valid.status == "ACKNOWLEDGED"
+
+
+def test_command_ttl_fallback_on_invalid_env(monkeypatch):
+    """Verify get_command_ttl_seconds safely falls back to 120s on invalid env variables."""
+    from app import crud
+
+    # 1. Non-numeric
+    monkeypatch.setenv("COMMAND_TTL_SECONDS", "invalid_string")
+    assert crud.get_command_ttl_seconds() == 120
+
+    # 2. Negative value
+    monkeypatch.setenv("COMMAND_TTL_SECONDS", "-45")
+    assert crud.get_command_ttl_seconds() == 120
+
+    # 3. Valid value
+    monkeypatch.setenv("COMMAND_TTL_SECONDS", "60")
+    assert crud.get_command_ttl_seconds() == 60
+
+
+def test_history_readings_limit_bounds():
+    """Verify limit validation on /api/readings/history (1 <= limit <= 500)."""
+    # limit = 0 -> 422
+    res_zero = client.get("/api/readings/history?limit=0")
+    assert res_zero.status_code == 422
+
+    # limit = 501 -> 422
+    res_over = client.get("/api/readings/history?limit=501")
+    assert res_over.status_code == 422

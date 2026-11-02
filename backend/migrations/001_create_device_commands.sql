@@ -10,7 +10,9 @@ CREATE TABLE IF NOT EXISTS device_commands (
     command_type VARCHAR(32) NOT NULL,
     command_status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-    acknowledged_at TIMESTAMP WITH TIME ZONE
+    acknowledged_at TIMESTAMP WITH TIME ZONE,
+    CONSTRAINT chk_command_type CHECK (command_type IN ('MUTE_ALARM', 'UNMUTE_ALARM')),
+    CONSTRAINT chk_command_status CHECK (command_status IN ('PENDING', 'ACKNOWLEDGED', 'EXPIRED'))
 );
 
 CREATE INDEX IF NOT EXISTS ix_device_commands_id ON device_commands (id);
