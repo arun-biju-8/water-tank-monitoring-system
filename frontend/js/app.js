@@ -27,9 +27,7 @@
 
   const API_BASE = isLocalEnvironment
     ? LOCAL_API_BASE
-    : window.location.origin.includes("onrender.com")
-      ? window.location.origin
-      : CLOUD_API_BASE;
+    : CLOUD_API_BASE;
 
   console.log("[TankPulse] API Base:", API_BASE);
 
@@ -1519,3 +1517,4 @@
     init();
   }
 })();
+
