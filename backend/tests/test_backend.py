@@ -547,13 +547,15 @@ def test_post_reading_returns_ist_timestamp():
 # 7. Device Command & Remote Buzzer Control Tests
 # ==============================================================================
 
-def test_post_mute_command_success():
-    """Verify POST /api/commands/mute creates pending command."""
+def test_post_mute_command_success(monkeypatch):
+    """Verify POST /api/commands/mute creates pending command with valid operator token."""
     from app.models import DeviceCommand
+    monkeypatch.setenv("DASHBOARD_CONTROL_TOKEN", "valid_test_token_123")
 
     mock_session = MagicMock()
     mock_query = MagicMock()
     mock_session.query.return_value = mock_query
+    mock_query.filter.return_value.all.return_value = []
     mock_query.filter.return_value.order_by.return_value.first.return_value = None
 
     def fake_refresh(cmd):
@@ -569,7 +571,11 @@ def test_post_mute_command_success():
 
     app.dependency_overrides[get_db] = override_get_db
     try:
-        res = client.post("/api/commands/mute", json={"device_id": "esp32-tank-01"})
+        res = client.post(
+            "/api/commands/mute",
+            json={"device_id": "esp32-tank-01"},
+            headers={"X-Dashboard-Token": "valid_test_token_123"}
+        )
         assert res.status_code == 201
         data = res.json()
         assert data["id"] == 1
@@ -588,6 +594,7 @@ def test_dashboard_token_auth_enforcement(monkeypatch):
     mock_session = MagicMock()
     mock_query = MagicMock()
     mock_session.query.return_value = mock_query
+    mock_query.filter.return_value.all.return_value = []
     mock_query.filter.return_value.order_by.return_value.first.return_value = None
 
     def fake_refresh(cmd):
@@ -642,6 +649,7 @@ def test_esp32_device_key_auth_enforcement(monkeypatch):
     mock_session = MagicMock()
     mock_query = MagicMock()
     mock_session.query.return_value = mock_query
+    mock_query.filter.return_value.all.return_value = []
     mock_query.filter.return_value.order_by.return_value.first.return_value = fake_cmd
 
     def override_get_db():
@@ -666,9 +674,10 @@ def test_esp32_device_key_auth_enforcement(monkeypatch):
         app.dependency_overrides.clear()
 
 
-def test_esp32_ack_command_success():
-    """Verify POST /api/commands/{id}/ack updates status to ACKNOWLEDGED."""
+def test_esp32_ack_command_success(monkeypatch):
+    """Verify POST /api/commands/{id}/ack updates status to ACKNOWLEDGED with valid key."""
     from app.models import DeviceCommand
+    monkeypatch.setenv("ESP32_API_KEY", "hardware_secret_key_456")
 
     fake_cmd = DeviceCommand(
         id=15,
@@ -696,7 +705,11 @@ def test_esp32_ack_command_success():
 
     app.dependency_overrides[get_db] = override_get_db
     try:
-        res = client.post("/api/commands/15/ack", json={"device_id": "esp32-tank-01"})
+        res = client.post(
+            "/api/commands/15/ack",
+            json={"device_id": "esp32-tank-01"},
+            headers={"X-Device-Key": "hardware_secret_key_456"}
+        )
         assert res.status_code == 200
         data = res.json()
         assert data["id"] == 15
@@ -738,5 +751,194 @@ def test_get_command_status_and_history():
         assert res_hist.status_code == 200
         assert len(res_hist.json()) == 1
         assert res_hist.json()[0]["id"] == 20
+    finally:
+        app.dependency_overrides.clear()
+
+
+# ==============================================================================
+# 8. Security Hardening & Edge Case Tests
+# ==============================================================================
+
+def test_server_missing_credentials_returns_503(monkeypatch):
+    """Verify missing DASHBOARD_CONTROL_TOKEN or ESP32_API_KEY yields 503 Service Unavailable."""
+    monkeypatch.delenv("DASHBOARD_CONTROL_TOKEN", raising=False)
+    monkeypatch.delenv("ESP32_API_KEY", raising=False)
+    monkeypatch.delenv("ALLOW_INSECURE_DEV_AUTH", raising=False)
+
+    # 1. Mute command with unset server token -> 503
+    res_mute = client.post("/api/commands/mute", json={"device_id": "esp32-tank-01"})
+    assert res_mute.status_code == 503
+    assert "DASHBOARD_CONTROL_TOKEN is not configured" in res_mute.json()["detail"]
+
+    # 2. Polling with unset server key -> 503
+    res_poll = client.get("/api/commands/pending?device_id=esp32-tank-01")
+    assert res_poll.status_code == 503
+    assert "ESP32_API_KEY is not configured" in res_poll.json()["detail"]
+
+    # 3. Acknowledging with unset server key -> 503
+    res_ack = client.post("/api/commands/1/ack", json={"device_id": "esp32-tank-01"})
+    assert res_ack.status_code == 503
+    assert "ESP32_API_KEY is not configured" in res_ack.json()["detail"]
+
+
+def test_render_production_blocks_dev_bypass(monkeypatch):
+    """Verify that on Render, ALLOW_INSECURE_DEV_AUTH=true is strictly ignored and blocked."""
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("ALLOW_INSECURE_DEV_AUTH", "true")
+    monkeypatch.delenv("DASHBOARD_CONTROL_TOKEN", raising=False)
+    monkeypatch.delenv("ESP32_API_KEY", raising=False)
+
+    res = client.post("/api/commands/mute", json={"device_id": "esp32-tank-01"})
+    assert res.status_code == 503
+    assert "DASHBOARD_CONTROL_TOKEN is not configured" in res.json()["detail"]
+
+
+def test_command_ownership_enforcement(monkeypatch):
+    """Verify an ESP32 cannot acknowledge commands issued to another device ID (403 Forbidden)."""
+    from app.models import DeviceCommand
+    monkeypatch.setenv("ESP32_API_KEY", "hardware_secret_key_456")
+
+    # Command was issued to 'esp32-tank-01'
+    foreign_cmd = DeviceCommand(
+        id=55,
+        device_id="esp32-tank-01",
+        command_type="MUTE_ALARM",
+        command_status="PENDING",
+        created_at=datetime.now(timezone.utc)
+    )
+
+    mock_session = MagicMock()
+    mock_query = MagicMock()
+    mock_session.query.return_value = mock_query
+    mock_query.filter.return_value.first.return_value = foreign_cmd
+
+    def override_get_db():
+        yield mock_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        # Rogue or different device 'esp32-tank-02' attempts to acknowledge it
+        res = client.post(
+            "/api/commands/55/ack",
+            json={"device_id": "esp32-tank-02"},
+            headers={"X-Device-Key": "hardware_secret_key_456"}
+        )
+        assert res.status_code == 403
+        assert "Forbidden" in res.json()["detail"]
+        assert "esp32-tank-01" in res.json()["detail"]
+        assert "esp32-tank-02" in res.json()["detail"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_stale_command_expiration(monkeypatch):
+    """Verify stale commands exceeding TTL are transitioned to EXPIRED and not returned as pending."""
+    from datetime import timedelta
+    from app.models import DeviceCommand
+    monkeypatch.setenv("ESP32_API_KEY", "hardware_secret_key_456")
+
+    stale_cmd = DeviceCommand(
+        id=60,
+        device_id="esp32-tank-01",
+        command_type="MUTE_ALARM",
+        command_status="PENDING",
+        created_at=datetime.now(timezone.utc) - timedelta(minutes=10)
+    )
+
+    mock_session = MagicMock()
+    mock_query = MagicMock()
+    mock_session.query.return_value = mock_query
+
+    mock_query.filter.return_value = mock_query
+    mock_query.all.return_value = [stale_cmd]
+    mock_query.order_by.return_value.first.return_value = None
+
+    def override_get_db():
+        yield mock_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        res = client.get(
+            "/api/commands/pending?device_id=esp32-tank-01",
+            headers={"X-Device-Key": "hardware_secret_key_456"}
+        )
+        assert res.status_code == 200
+        data = res.json()
+        assert data["command"] is None
+        assert stale_cmd.command_status == "EXPIRED"
+        assert mock_session.commit.called
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_expired_command_cannot_be_acknowledged(monkeypatch):
+    """Verify attempting to acknowledge an already EXPIRED command returns 410 Gone."""
+    from app.models import DeviceCommand
+    monkeypatch.setenv("ESP32_API_KEY", "hardware_secret_key_456")
+
+    expired_cmd = DeviceCommand(
+        id=70,
+        device_id="esp32-tank-01",
+        command_type="MUTE_ALARM",
+        command_status="EXPIRED",
+        created_at=datetime.now(timezone.utc)
+    )
+
+    mock_session = MagicMock()
+    mock_query = MagicMock()
+    mock_session.query.return_value = mock_query
+    mock_query.filter.return_value.first.return_value = expired_cmd
+
+    def override_get_db():
+        yield mock_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        res = client.post(
+            "/api/commands/70/ack",
+            json={"device_id": "esp32-tank-01"},
+            headers={"X-Device-Key": "hardware_secret_key_456"}
+        )
+        assert res.status_code == 410
+        assert "expired" in res.json()["detail"].lower()
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_duplicate_mute_requests_deduplicated(monkeypatch):
+    """Verify that duplicate mute requests reuse existing pending command without duplicate insertions."""
+    from app.models import DeviceCommand
+    monkeypatch.setenv("DASHBOARD_CONTROL_TOKEN", "valid_test_token_123")
+
+    existing_pending = DeviceCommand(
+        id=80,
+        device_id="esp32-tank-01",
+        command_type="MUTE_ALARM",
+        command_status="PENDING",
+        created_at=datetime.now(timezone.utc)
+    )
+
+    mock_session = MagicMock()
+    mock_query = MagicMock()
+    mock_session.query.return_value = mock_query
+    mock_query.filter.return_value.all.return_value = []
+    # Returns existing active command
+    mock_query.filter.return_value.order_by.return_value.first.return_value = existing_pending
+
+    def override_get_db():
+        yield mock_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        res = client.post(
+            "/api/commands/mute",
+            json={"device_id": "esp32-tank-01"},
+            headers={"X-Dashboard-Token": "valid_test_token_123"}
+        )
+        assert res.status_code == 201
+        data = res.json()
+        assert data["id"] == 80
+        # mock_session.add should NOT have been called because existing command was reused
+        mock_session.add.assert_not_called()
     finally:
         app.dependency_overrides.clear()

@@ -541,6 +541,13 @@
             // Immediately refresh telemetry to sync dashboard
             fetchTelemetry();
             return;
+          } else if (cmd.command_status === "EXPIRED") {
+            clearInterval(pollInterval);
+            state.commandInFlight = false;
+            updateAlarmControlUI();
+            setCommandFeedback(`Notice: Command #${commandId} expired before ESP32 received it.`);
+            fetchTelemetry();
+            return;
           }
         }
       } catch (e) {

@@ -2,10 +2,18 @@
 CRUD (Create, Read, Update, Delete) operations for water reading records and device commands.
 """
 
+import os
+import logging
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 from . import models, schemas
+
+logger = logging.getLogger(__name__)
+
+# Command Time-To-Live: Commands older than 120s are expired to prevent stale execution
+COMMAND_TTL_SECONDS = int(os.getenv("COMMAND_TTL_SECONDS", "120"))
 
 
 # ==============================================================================
@@ -68,11 +76,38 @@ def count_readings(db: Session) -> int:
 # Device Command Operations (Bidirectional Remote Control)
 # ==============================================================================
 
+def expire_stale_commands(db: Session, device_id: Optional[str] = None) -> int:
+    """
+    Marks any PENDING commands older than COMMAND_TTL_SECONDS as EXPIRED.
+    Prevents stale commands from unexpectedly silencing the buzzer after reconnection.
+    Returns the count of expired commands.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=COMMAND_TTL_SECONDS)
+    filters = [
+        models.DeviceCommand.command_status == "PENDING",
+        models.DeviceCommand.created_at < cutoff
+    ]
+    if device_id:
+        filters.append(models.DeviceCommand.device_id == device_id)
+
+    stale_commands = db.query(models.DeviceCommand).filter(*filters).all()
+    if stale_commands:
+        for cmd in stale_commands:
+            cmd.command_status = "EXPIRED"
+        db.commit()
+        logger.info("Expired %d stale pending command(s) for device '%s'", len(stale_commands), device_id or "all")
+        return len(stale_commands)
+    return 0
+
+
 def create_mute_command(db: Session, device_id: str = "esp32-tank-01") -> models.DeviceCommand:
     """
     Creates a new MUTE_ALARM command for the target device.
-    Re-uses existing pending mute command if one is already in flight.
+    First cleans up any stale commands exceeding TTL, then re-uses any active
+    pending mute command in flight (deduplicating rapid operator clicks).
     """
+    expire_stale_commands(db=db, device_id=device_id)
+
     existing = (
         db.query(models.DeviceCommand)
         .filter(
@@ -84,6 +119,7 @@ def create_mute_command(db: Session, device_id: str = "esp32-tank-01") -> models
         .first()
     )
     if existing:
+        logger.info("Deduplicating mute request: reusing active pending command #%d for device '%s'", existing.id, device_id)
         return existing
 
     cmd = models.DeviceCommand(
@@ -99,8 +135,11 @@ def create_mute_command(db: Session, device_id: str = "esp32-tank-01") -> models
 
 def get_pending_command(db: Session, device_id: str = "esp32-tank-01") -> Optional[models.DeviceCommand]:
     """
-    Retrieves the oldest pending command waiting to be consumed by the ESP32.
+    Retrieves the oldest valid (unexpired) pending command waiting for the ESP32.
+    First marks any stale commands exceeding TTL as EXPIRED.
     """
+    expire_stale_commands(db=db, device_id=device_id)
+
     return (
         db.query(models.DeviceCommand)
         .filter(
@@ -115,22 +154,28 @@ def get_pending_command(db: Session, device_id: str = "esp32-tank-01") -> Option
 def acknowledge_command(
     db: Session,
     command_id: int,
-    device_id: Optional[str] = None
+    device_id: str
 ) -> Optional[models.DeviceCommand]:
     """
-    Marks a command as ACKNOWLEDGED once executed by the ESP32 hardware.
+    Marks a command as ACKNOWLEDGED once executed by the intended ESP32 hardware.
+    Enforces matching device_id ownership.
     """
-    filters = [models.DeviceCommand.id == command_id]
-    if device_id:
-        filters.append(models.DeviceCommand.device_id == device_id)
-    cmd = db.query(models.DeviceCommand).filter(*filters).first()
+    cmd = (
+        db.query(models.DeviceCommand)
+        .filter(
+            models.DeviceCommand.id == command_id,
+            models.DeviceCommand.device_id == device_id
+        )
+        .first()
+    )
     if not cmd:
         return None
 
-    cmd.command_status = "ACKNOWLEDGED"
-    cmd.acknowledged_at = func.now()
-    db.commit()
-    db.refresh(cmd)
+    if cmd.command_status != "ACKNOWLEDGED":
+        cmd.command_status = "ACKNOWLEDGED"
+        cmd.acknowledged_at = func.now()
+        db.commit()
+        db.refresh(cmd)
     return cmd
 
 

@@ -17,3 +17,4 @@ CREATE INDEX IF NOT EXISTS ix_device_commands_id ON device_commands (id);
 CREATE INDEX IF NOT EXISTS ix_device_commands_device_id ON device_commands (device_id);
 CREATE INDEX IF NOT EXISTS ix_device_commands_command_status ON device_commands (command_status);
 CREATE INDEX IF NOT EXISTS ix_device_commands_created_at ON device_commands (created_at);
+

@@ -293,12 +293,18 @@ void pollPendingCloudCommands() {
           if (cmdId > 0) {
             Serial.printf("[Cloud] Received remote command #%d: MUTE_ALARM\n", cmdId);
 
-            // Execute physical buzzer silencing
-            buzzerMuted = true;
-            digitalWrite(buzzerPin, LOW);
-            updateTelemetrySnapshot(true);
+            // Only silence buzzer if alarm is currently active (level 0% or 100%)
+            // Prevents reconnected ESP32 from muting future alarms
+            if (alarmActive()) {
+              buzzerMuted = true;
+              digitalWrite(buzzerPin, LOW);
+              updateTelemetrySnapshot(true);
+              Serial.println("[Cloud] Physical buzzer on GPIO 23 silenced.");
+            } else {
+              Serial.println("[Cloud] Alarm is not active; command acknowledged without muting future alarms.");
+            }
 
-            // Send acknowledgment back to cloud
+            // Send acknowledgment back to cloud to clear command
             acknowledgeCloudCommand(cmdId);
           }
         }
