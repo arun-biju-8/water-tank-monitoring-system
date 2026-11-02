@@ -27,9 +27,7 @@
 
   const API_BASE = isLocalEnvironment
     ? LOCAL_API_BASE
-    : window.location.origin.includes("onrender.com")
-      ? window.location.origin
-      : CLOUD_API_BASE;
+    : CLOUD_API_BASE;
 
   console.log("[TankPulse] API Base:", API_BASE);
 
@@ -65,7 +63,7 @@
     commandInFlight: false,
     pendingCommandId: null,
     operatorToken: (typeof sessionStorage !== "undefined" && sessionStorage.getItem(STORAGE_KEY_TOKEN)) ||
-                   (typeof localStorage !== "undefined" && localStorage.getItem(STORAGE_KEY_TOKEN)) || "",
+      (typeof localStorage !== "undefined" && localStorage.getItem(STORAGE_KEY_TOKEN)) || "",
   };
 
   // ============================================================================
