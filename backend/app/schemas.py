@@ -2,9 +2,26 @@
 Pydantic schemas for data validation and API response serialization.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Optional
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+
+# Standard IANA timezone identifier for Indian Standard Time
+IST_TIMEZONE = ZoneInfo("Asia/Kolkata")
+
+
+def to_ist(dt: Optional[datetime]) -> Optional[datetime]:
+    """
+    Converts a datetime to Indian Standard Time (Asia/Kolkata, UTC+05:30).
+    If the input datetime is naive (lacks tzinfo), it is treated as UTC.
+    Returns a timezone-aware datetime with the +05:30 offset.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(IST_TIMEZONE)
 
 
 class WaterReadingBase(BaseModel):
@@ -60,11 +77,18 @@ class WaterReadingCreate(WaterReadingBase):
 class WaterReadingResponse(WaterReadingBase):
     """
     Schema for serializing sensor reading records returned by the API.
+    Converts created_at timestamp to Indian Standard Time (IST, UTC+05:30).
     """
     id: int = Field(..., description="Unique reading identifier", examples=[1])
-    created_at: datetime = Field(..., description="Timestamp when the reading was recorded")
+    created_at: datetime = Field(..., description="Timestamp when the reading was recorded (IST, UTC+05:30)")
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("created_at", mode="after")
+    @classmethod
+    def convert_created_at_to_ist(cls, v: Optional[datetime]) -> Optional[datetime]:
+        """Converts UTC database timestamp to Indian Standard Time (+05:30) on output."""
+        return to_ist(v)
 
 
 class HealthResponse(BaseModel):

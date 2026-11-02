@@ -389,3 +389,154 @@ def test_mocked_db_get_history_success():
         assert data[2]["id"] == 3
     finally:
         app.dependency_overrides.clear()
+
+
+
+# ==============================================================================
+# 6. Indian Standard Time (IST, UTC+05:30) Serialization Tests
+# ==============================================================================
+
+def test_water_reading_response_serializes_ist_offset():
+    """Verify WaterReadingResponse serializes UTC timestamps to IST (+05:30) with date rollover."""
+    from app.schemas import WaterReadingResponse
+
+    # Midnight rollover: 20:00 UTC on Nov 2 -> 01:30 IST on Nov 3
+    utc_time = datetime(2026, 11, 2, 20, 0, 0, tzinfo=timezone.utc)
+    reading_res = WaterReadingResponse(
+        id=1,
+        water_level=50,
+        probe_25=True,
+        probe_50=True,
+        probe_75=False,
+        probe_100=False,
+        alarm=False,
+        muted=False,
+        created_at=utc_time
+    )
+
+    data = reading_res.model_dump()
+    assert data["created_at"].isoformat() == "2026-11-03T01:30:00+05:30"
+
+    json_str = reading_res.model_dump_json()
+    assert "2026-11-03T01:30:00+05:30" in json_str
+
+
+def test_api_latest_reading_returns_ist_timestamp():
+    """Verify GET /api/readings/latest returns timestamp serialized in IST (+05:30)."""
+    utc_time = datetime(2026, 11, 2, 10, 0, 0, tzinfo=timezone.utc)
+    fake_reading = WaterReading(
+        id=99,
+        water_level=75,
+        probe_25=True,
+        probe_50=True,
+        probe_75=True,
+        probe_100=False,
+        alarm=False,
+        muted=False,
+        created_at=utc_time
+    )
+
+    mock_session = MagicMock()
+    mock_query = MagicMock()
+    mock_session.query.return_value = mock_query
+    mock_query.order_by.return_value.first.return_value = fake_reading
+
+    def override_get_db():
+        yield mock_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        res = client.get("/api/readings/latest")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["id"] == 99
+        assert data["created_at"] == "2026-11-02T15:30:00+05:30"
+        assert data["created_at"].endswith("+05:30")
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_api_history_readings_return_ist_timestamps():
+    """Verify GET /api/readings/history entries are serialized in IST (+05:30)."""
+    fake_readings = [
+        WaterReading(
+            id=10,
+            water_level=25,
+            probe_25=True,
+            probe_50=False,
+            probe_75=False,
+            probe_100=False,
+            alarm=False,
+            muted=False,
+            created_at=datetime(2026, 11, 2, 23, 45, 0, tzinfo=timezone.utc)
+        )
+    ]
+
+    mock_session = MagicMock()
+    mock_query = MagicMock()
+    mock_session.query.return_value = mock_query
+    mock_query.order_by.return_value.offset.return_value.limit.return_value.all.return_value = fake_readings
+
+    def override_get_db():
+        yield mock_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        res = client.get("/api/readings/history?limit=1")
+        assert res.status_code == 200
+        data = res.json()
+        assert len(data) == 1
+        # UTC 23:45 + 5h30m = Next day 05:15 IST
+        assert data[0]["created_at"] == "2026-11-03T05:15:00+05:30"
+        assert data[0]["created_at"].endswith("+05:30")
+    finally:
+        app.dependency_overrides.clear()
+
+def test_post_reading_returns_ist_timestamp():
+    """Verify POST /api/readings returns timestamp serialized in IST (+05:30)."""
+    utc_time = datetime(2026, 11, 2, 12, 0, 0, tzinfo=timezone.utc)
+    fake_reading = WaterReading(
+        id=7,
+        water_level=25,
+        probe_25=True,
+        probe_50=False,
+        probe_75=False,
+        probe_100=False,
+        alarm=False,
+        muted=False,
+        created_at=utc_time
+    )
+
+    mock_session = MagicMock()
+    mock_session.add = MagicMock()
+    mock_session.commit = MagicMock()
+
+    def fake_refresh(instance):
+        instance.id = fake_reading.id
+        instance.created_at = fake_reading.created_at
+
+    mock_session.refresh = MagicMock(side_effect=fake_refresh)
+
+    def override_get_db():
+        yield mock_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        payload = {
+            "water_level": 25,
+            "probe_25": True,
+            "probe_50": False,
+            "probe_75": False,
+            "probe_100": False,
+            "alarm": False,
+            "muted": False,
+        }
+        res = client.post("/api/readings", json=payload)
+        assert res.status_code == 201
+        data = res.json()
+        assert data["id"] == 7
+        # 12:00 UTC + 5h30m = 17:30 IST
+        assert data["created_at"] == "2026-11-02T17:30:00+05:30"
+        assert data["created_at"].endswith("+05:30")
+    finally:
+        app.dependency_overrides.clear()
