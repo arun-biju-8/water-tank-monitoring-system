@@ -540,3 +540,203 @@ def test_post_reading_returns_ist_timestamp():
         assert data["created_at"].endswith("+05:30")
     finally:
         app.dependency_overrides.clear()
+
+
+
+# ==============================================================================
+# 7. Device Command & Remote Buzzer Control Tests
+# ==============================================================================
+
+def test_post_mute_command_success():
+    """Verify POST /api/commands/mute creates pending command."""
+    from app.models import DeviceCommand
+
+    mock_session = MagicMock()
+    mock_query = MagicMock()
+    mock_session.query.return_value = mock_query
+    mock_query.filter.return_value.order_by.return_value.first.return_value = None
+
+    def fake_refresh(cmd):
+        cmd.id = 1
+        cmd.created_at = datetime.now(timezone.utc)
+
+    mock_session.add = MagicMock()
+    mock_session.commit = MagicMock()
+    mock_session.refresh = MagicMock(side_effect=fake_refresh)
+
+    def override_get_db():
+        yield mock_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        res = client.post("/api/commands/mute", json={"device_id": "esp32-tank-01"})
+        assert res.status_code == 201
+        data = res.json()
+        assert data["id"] == 1
+        assert data["command_type"] == "MUTE_ALARM"
+        assert data["command_status"] == "PENDING"
+        assert "+05:30" in data["created_at"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_dashboard_token_auth_enforcement(monkeypatch):
+    """Verify X-Dashboard-Token header is required when DASHBOARD_CONTROL_TOKEN is set."""
+    from app.models import DeviceCommand
+    monkeypatch.setenv("DASHBOARD_CONTROL_TOKEN", "secure_secret_token_123")
+
+    mock_session = MagicMock()
+    mock_query = MagicMock()
+    mock_session.query.return_value = mock_query
+    mock_query.filter.return_value.order_by.return_value.first.return_value = None
+
+    def fake_refresh(cmd):
+        cmd.id = 5
+        cmd.created_at = datetime.now(timezone.utc)
+
+    mock_session.refresh = MagicMock(side_effect=fake_refresh)
+
+    def override_get_db():
+        yield mock_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        # 1. Missing header -> 401
+        res = client.post("/api/commands/mute", json={"device_id": "esp32-tank-01"})
+        assert res.status_code == 401
+        assert "Unauthorized" in res.json()["detail"]
+
+        # 2. Wrong header -> 401
+        res_wrong = client.post(
+            "/api/commands/mute",
+            json={"device_id": "esp32-tank-01"},
+            headers={"X-Dashboard-Token": "wrong_pin"}
+        )
+        assert res_wrong.status_code == 401
+
+        # 3. Correct header -> 201
+        res_ok = client.post(
+            "/api/commands/mute",
+            json={"device_id": "esp32-tank-01"},
+            headers={"X-Dashboard-Token": "secure_secret_token_123"}
+        )
+        assert res_ok.status_code == 201
+        assert res_ok.json()["command_type"] == "MUTE_ALARM"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_esp32_device_key_auth_enforcement(monkeypatch):
+    """Verify X-Device-Key header is required when ESP32_API_KEY is set."""
+    from app.models import DeviceCommand
+    monkeypatch.setenv("ESP32_API_KEY", "hardware_secret_key_456")
+
+    fake_cmd = DeviceCommand(
+        id=8,
+        device_id="esp32-tank-01",
+        command_type="MUTE_ALARM",
+        command_status="PENDING",
+        created_at=datetime.now(timezone.utc)
+    )
+
+    mock_session = MagicMock()
+    mock_query = MagicMock()
+    mock_session.query.return_value = mock_query
+    mock_query.filter.return_value.order_by.return_value.first.return_value = fake_cmd
+
+    def override_get_db():
+        yield mock_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        # 1. Without key -> 401
+        res = client.get("/api/commands/pending?device_id=esp32-tank-01")
+        assert res.status_code == 401
+
+        # 2. With valid key -> 200
+        res_ok = client.get(
+            "/api/commands/pending?device_id=esp32-tank-01",
+            headers={"X-Device-Key": "hardware_secret_key_456"}
+        )
+        assert res_ok.status_code == 200
+        data = res_ok.json()
+        assert data["command"]["id"] == 8
+        assert data["command"]["command_type"] == "MUTE_ALARM"
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_esp32_ack_command_success():
+    """Verify POST /api/commands/{id}/ack updates status to ACKNOWLEDGED."""
+    from app.models import DeviceCommand
+
+    fake_cmd = DeviceCommand(
+        id=15,
+        device_id="esp32-tank-01",
+        command_type="MUTE_ALARM",
+        command_status="PENDING",
+        created_at=datetime.now(timezone.utc)
+    )
+
+    mock_session = MagicMock()
+    mock_query = MagicMock()
+    mock_session.query.return_value = mock_query
+    mock_query.filter.return_value = mock_query
+    mock_query.first.return_value = fake_cmd
+
+    def fake_refresh(cmd):
+        cmd.command_status = "ACKNOWLEDGED"
+        cmd.acknowledged_at = datetime.now(timezone.utc)
+
+    mock_session.commit = MagicMock()
+    mock_session.refresh = MagicMock(side_effect=fake_refresh)
+
+    def override_get_db():
+        yield mock_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        res = client.post("/api/commands/15/ack", json={"device_id": "esp32-tank-01"})
+        assert res.status_code == 200
+        data = res.json()
+        assert data["id"] == 15
+        assert data["command_status"] == "ACKNOWLEDGED"
+        assert "+05:30" in data["acknowledged_at"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_get_command_status_and_history():
+    """Verify GET /api/commands/status/{id} and /api/commands/history."""
+    from app.models import DeviceCommand
+
+    fake_cmd = DeviceCommand(
+        id=20,
+        device_id="esp32-tank-01",
+        command_type="MUTE_ALARM",
+        command_status="ACKNOWLEDGED",
+        created_at=datetime.now(timezone.utc),
+        acknowledged_at=datetime.now(timezone.utc)
+    )
+
+    mock_session = MagicMock()
+    mock_query = MagicMock()
+    mock_session.query.return_value = mock_query
+    mock_query.filter.return_value.first.return_value = fake_cmd
+    mock_query.order_by.return_value.limit.return_value.all.return_value = [fake_cmd]
+
+    def override_get_db():
+        yield mock_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    try:
+        res_status = client.get("/api/commands/status/20")
+        assert res_status.status_code == 200
+        assert res_status.json()["command_status"] == "ACKNOWLEDGED"
+
+        res_hist = client.get("/api/commands/history?limit=5")
+        assert res_hist.status_code == 200
+        assert len(res_hist.json()) == 1
+        assert res_hist.json()[0]["id"] == 20
+    finally:
+        app.dependency_overrides.clear()

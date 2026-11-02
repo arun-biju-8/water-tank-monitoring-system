@@ -1,6 +1,67 @@
 #include <WiFi.h>
 #include <WebServer.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <time.h>
 #include "secrets.h"
+
+// ---------- Cloud Backend Endpoints ----------
+const char* cloudEndpoint        = "https://tankpulse-2sq4.onrender.com/api/readings";
+const char* commandPollEndpoint  = "https://tankpulse-2sq4.onrender.com/api/commands/pending?device_id=esp32-tank-01";
+const char* commandAckBaseUrl    = "https://tankpulse-2sq4.onrender.com/api/commands/";
+
+// Trusted Root CA certificates for Render endpoint (*.onrender.com)
+// Includes GlobalSign Root CA (primary root) and GTS Root R4 (Google Trust Services root)
+const char* rootCACertificate PROGMEM = \
+"-----BEGIN CERTIFICATE-----\n" \
+"MIIDdTCCAl2gAwIBAgILBAAAAAABFUtaw5QwDQYJKoZIhvcNAQEFBQAwVzELMAkG\n" \
+"A1UEBhMCQkUxGTAXBgNVBAoTEEdsb2JhbFNpZ24gbnYtc2ExEDAOBgNVBAsTB1Jv\n" \
+"b3QgQ0ExGzAZBgNVBAMTEkdsb2JhbFNpZ24gUm9vdCBDQTAeFw05ODA5MDExMjAw\n" \
+"MDBaFw0yODAxMjgxMjAwMDBaMFcxCzAJBgNVBAYTAkJFMRkwFwYDVQQKExBHbG9i\n" \
+"YWxTaWduIG52LXNhMRAwDgYDVQQLEwdSb290IENBMRswGQYDVQQDExJHbG9iYWxT\n" \
+"aWduIFJvb3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDaDuaZ\n" \
+"jc6j40+Kfvvxi4Mla+pIH/EqsLmVEQS98GPR4mdmzxzdzxtIK+6NiY6arymAZavp\n" \
+"xy0Sy6scTHAHoT0KMM0VjU/43dSMUBUc71DuxC73/OlS8pF94G3VNTCOXkNz8kHp\n" \
+"1Wrjsok6Vjk4bwY8iGlbKk3Fp1S4bInMm/k8yuX9ifUSPJJ4ltbcdG6TRGHRjcdG\n" \
+"snUOhugZitVtbNV4FpWi6cgKOOvyJBNPc1STE4U6G7weNLWLBYy5d4ux2x8gkasJ\n" \
+"U26Qzns3dLlwR5EiUWMWea6xrkEmCMgZK9FGqkjWZCrXgzT/LCrBbBlDSgeF59N8\n" \
+"9iFo7+ryUp9/k5DPAgMBAAGjQjBAMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8E\n" \
+"BTADAQH/MB0GA1UdDgQWBBRge2YaRQ2XyolQL30EzTSo//z9SzANBgkqhkiG9w0B\n" \
+"AQUFAAOCAQEA1nPnfE920I2/7LqivjTFKDK1fPxsnCwrvQmeU79rXqoRSLblCKOz\n" \
+"yj1hTdNGCbM+w6DjY1Ub8rrvrTnhQ7k4o+YviiY776BQVvnGCv04zcQLcFGUl5gE\n" \
+"38NflNUVyRRBnMRddWQVDf9VMOyGj/8N7yy5Y0b2qvzfvGn9LhJIZJrglfCm7ymP\n" \
+"AbEVtQwdpf5pLGkkeB6zpxxxYu7KyJesF12KwvhHhm4qxFYxldBniYUr+WymXUad\n" \
+"DKqC5JlR3XC321Y9YeRq4VzW9v493kHMB65jUr9TU/Qr6cf9tveCX4XSQRjbgbME\n" \
+"HMUfpIBvFSDJ3gyICh3WZlXi/EjJKSZp4A==\n" \
+"-----END CERTIFICATE-----\n" \
+"-----BEGIN CERTIFICATE-----\n" \
+"MIICCTCCAY6gAwIBAgINAgPlwGjvYxqccpBQUjAKBggqhkjOPQQDAzBHMQswCQYD\n" \
+"VQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2VzIExMQzEUMBIG\n" \
+"A1UEAxMLR1RTIFJvb3QgUjQwHhcNMTYwNjIyMDAwMDAwWhcNMzYwNjIyMDAwMDAw\n" \
+"WjBHMQswCQYDVQQGEwJVUzEiMCAGA1UEChMZR29vZ2xlIFRydXN0IFNlcnZpY2Vz\n" \
+"IExMQzEUMBIGA1UEAxMLR1RTIFJvb3QgUjQwdjAQBgcqhkjOPQIBBgUrgQQAIgNi\n" \
+"AATzdHOnaItgrkO4NcWBMHtLSZ37wWHO5t5GvWvVYRg1rkDdc/eJkTBa6zzuhXyi\n" \
+"QHY7qca4R9gq55KRanPpsXI5nymfopjTX15YhmUPoYRlBtHci8nHc8iMai/lxKvR\n" \
+"HYqjQjBAMA4GA1UdDwEB/wQEAwIBhjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQW\n" \
+"BBSATNbrdP9JNqPV2Py1PsVq8JQdjDAKBggqhkjOPQQDAwNpADBmAjEA6ED/g94D\n" \
+"9J+uHXqnLrmvT/aDHQ4thQEd0dlq7A/Cr8deVl5c1RxYIigL9zC2L7F8AjEA8GE8\n" \
+"p/SgguMh1YQdc4acLa/KNJvxn7kjNuK8YAOdgLOaVsjh4rsUecrNIdSUtUlD\n" \
+"-----END CERTIFICATE-----\n";
+
+// ---------- Cloud Telemetry & FreeRTOS Synchronization ----------
+struct TankTelemetry {
+  int  waterLevel;
+  bool probe25;
+  bool probe50;
+  bool probe75;
+  bool probe100;
+  bool alarm;
+  bool muted;
+};
+
+TankTelemetry sharedTelemetry;
+SemaphoreHandle_t telemetryMutex = NULL;
+TaskHandle_t cloudTaskHandle = NULL;
 
 WebServer server(80);
 
@@ -28,7 +89,7 @@ int  candidateCount = 0;
 const int STABLE_READS = 3;  // 3 reads x 200 ms = 600 ms
 
 // =====================================================
-//  Dashboard page (HTML + CSS + JS), stored in flash
+//  Local Web Dashboard Page (Stored in Flash)
 // =====================================================
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -68,183 +129,34 @@ h1{font-size:1.6rem;font-weight:800;margin:0;letter-spacing:-.02em}
 .probe b{display:block;font-size:1.05rem;color:var(--muted)}
 .probe.wet{border-color:var(--water)} .probe.wet b{color:var(--water)}
 h2{font-size:1rem;margin:0 0 10px;font-weight:600;color:var(--muted)}
-#chart{width:100%;height:150px;display:block}
 button{font:inherit;font-weight:600;color:#fff;background:var(--bad);border:0;border-radius:10px;padding:12px 20px;cursor:pointer;margin-top:18px}
 button:disabled{background:var(--line);color:var(--muted);cursor:default}
-:focus-visible{outline:3px solid var(--water);outline-offset:2px}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <h1>Water tank level</h1>
+    <h1>Water tank level (Local Web Server)</h1>
     <span id="status" class="pill"><span class="dot"></span><span id="statusText">Connecting…</span></span>
   </header>
-
-  <div id="alert" class="alert ok">Waiting for the sensor…</div>
-
+  <div id="alert" class="alert ok">Monitoring...</div>
   <div class="grid">
     <section class="panel tank-panel">
-      <canvas id="tank" width="300" height="440" role="img" aria-label="Water tank level"></canvas>
+      <div class="big" id="big">–</div>
     </section>
-
     <section>
       <div class="panel">
-        <div class="big" id="big">–</div>
-        <div class="sub" id="sub">&nbsp;</div>
-        <div class="probes" id="probes"></div>
-        <button id="mute" type="button" disabled>Silence alarm</button>
-      </div>
-      <div class="panel" style="margin-top:18px">
-        <h2>Last 10 minutes</h2>
-        <canvas id="chart"></canvas>
+        <button id="mute" type="button" onclick="fetch('/mute', {method:'POST'}).then(()=>location.reload())">Silence physical alarm</button>
       </div>
     </section>
   </div>
 </div>
-
-<script>
-(function(){
-  const $ = id => document.getElementById(id);
-
-  // Sensor has 4 probes, so the level is one of 5 bands.
-  // "mid" is where the water is drawn inside the band.
-  const BANDS = {
-    0:   {label:"Below 25%", mid:12,  msg:"Tank is almost empty. Refill now.", cls:"bad"},
-    25:  {label:"25–50%",    mid:37,  msg:"Water level is low.",               cls:"warn"},
-    50:  {label:"50–75%",    mid:62,  msg:"Tank level is normal.",             cls:"ok"},
-    75:  {label:"75–100%",   mid:87,  msg:"Tank level is normal.",             cls:"ok"},
-    100: {label:"Full",      mid:100, msg:"Tank is full.",                     cls:"ok"}
-  };
-  const PROBE_NAMES = ["25%","50%","75%","100%"];
-
-  let target = 12, shown = 12, history = [];
-  const calm = matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-  // probe cards
-  $("probes").innerHTML = PROBE_NAMES.map((n,i) =>
-    '<div class="probe" id="p'+i+'"><b>'+n+'</b><span>–</span></div>').join("");
-
-  function setStatus(kind, text){
-    $("status").className = "pill " + kind;
-    $("statusText").textContent = text;
-  }
-
-  async function poll(){
-    try{
-      const res = await fetch("/level", {cache:"no-store"});
-      const d = await res.json();
-      const band = BANDS[d.level] || BANDS[0];
-      target = band.mid;
-
-      $("big").textContent = band.label;
-      $("sub").textContent = d.level === 100 ? "All four probes are wet" : "Reading comes from 4 probes";
-      const a = $("alert"); a.className = "alert " + band.cls; a.textContent = band.msg;
-
-      d.probes.forEach((wet,i) => {
-        const el = $("p"+i);
-        el.className = "probe" + (wet ? " wet" : "");
-        el.lastChild.textContent = wet ? "Wet" : "Dry";
-      });
-
-      const m = $("mute");
-      if (d.alarm && !d.muted){ m.disabled = false; m.textContent = "Silence alarm"; }
-      else { m.disabled = true; m.textContent = d.alarm ? "Alarm silenced" : "Alarm off"; }
-
-      history.push({t:Date.now(), v:band.mid});
-      const cut = Date.now() - 600000;
-      history = history.filter(p => p.t >= cut);
-      setStatus("live", "Live · " + new Date().toLocaleTimeString());
-    }catch(e){
-      setStatus("offline", "Can’t reach the tank");
-    }
-  }
-
-  $("mute").addEventListener("click", () => {
-    fetch("/mute", {method:"POST"}).then(poll);
-  });
-
-  // ----- canvas helpers -----
-  const cv = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
-  function setup(c,w,h){
-    const r = window.devicePixelRatio || 1;
-    c.width = w*r; c.height = h*r;
-    const x = c.getContext("2d"); x.setTransform(r,0,0,r,0,0); return x;
-  }
-  function rr(ctx,x,y,w,h,r){
-    ctx.beginPath(); ctx.moveTo(x+r,y);
-    ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r);
-    ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath();
-  }
-
-  // ----- tank -----
-  const TW=300, TH=440, tctx = setup($("tank"), TW, TH);
-  let wave = 0;
-  function drawTank(){
-    const ctx = tctx, x=30, y=20, w=TW-60, h=TH-40, r=34;
-    const water=cv("--water"), deep=cv("--deep"), line=cv("--line"), ink=cv("--ink"), bg=cv("--bg");
-    ctx.clearRect(0,0,TW,TH);
-    rr(ctx,x,y,w,h,r); ctx.fillStyle=bg; ctx.fill();
-    ctx.save(); rr(ctx,x,y,w,h,r); ctx.clip();
-
-    const surface = y + h - (shown/100)*h;
-    const amp = calm ? 0 : 5;
-    function layer(off,color,alpha){
-      ctx.beginPath(); ctx.moveTo(x,y+h);
-      for(let px=0; px<=w; px+=4) ctx.lineTo(x+px, surface + Math.sin(px/w*Math.PI*3 + wave + off)*amp);
-      ctx.lineTo(x+w,y+h); ctx.closePath();
-      ctx.globalAlpha=alpha; ctx.fillStyle=color; ctx.fill(); ctx.globalAlpha=1;
-    }
-    layer(1.8,water,.55); layer(0,deep,.9);
-
-    ctx.font = "12px " + cv("--font"); ctx.textBaseline = "middle";
-    [25,50,75,100].forEach(m => {
-      const ty = y + h - (m/100)*h + (m===100 ? 8 : 0);
-      ctx.globalAlpha=.3; ctx.strokeStyle=ink; ctx.lineWidth=1.5;
-      ctx.beginPath(); ctx.moveTo(x,ty); ctx.lineTo(x+18,ty); ctx.stroke();
-      ctx.globalAlpha=.65; ctx.fillStyle=ink; ctx.fillText(m+"%", x+24, ty);
-      ctx.globalAlpha=1;
-    });
-    ctx.restore();
-    rr(ctx,x,y,w,h,r); ctx.lineWidth=4; ctx.strokeStyle=line; ctx.stroke();
-  }
-
-  // ----- history chart (steps) -----
-  function drawChart(){
-    const c=$("chart"), W=c.clientWidth, H=c.clientHeight, ctx=setup(c,W,H);
-    const line=cv("--line"), water=cv("--water"), muted=cv("--muted");
-    ctx.clearRect(0,0,W,H); ctx.font="11px "+cv("--font"); ctx.fillStyle=muted; ctx.strokeStyle=line; ctx.lineWidth=1;
-    const py = p => H-4-(p/100)*(H-12);
-    [0,50,100].forEach(v => { ctx.beginPath(); ctx.moveTo(34,py(v)); ctx.lineTo(W,py(v)); ctx.stroke(); ctx.fillText(v+"%",0,py(v)+4); });
-    if(history.length < 2){ ctx.fillText("Collecting readings…", 44, H/2); return; }
-    const t1=Date.now(), t0=t1-600000, px = t => 34 + (t-t0)/(t1-t0)*(W-34);
-    ctx.beginPath();
-    history.forEach((p,i) => i ? ctx.lineTo(px(p.t),py(p.v)) : ctx.moveTo(px(p.t),py(p.v)));
-    ctx.strokeStyle=water; ctx.lineWidth=2.5; ctx.stroke();
-    ctx.lineTo(px(history[history.length-1].t),py(0)); ctx.lineTo(px(history[0].t),py(0)); ctx.closePath();
-    ctx.globalAlpha=.15; ctx.fillStyle=water; ctx.fill(); ctx.globalAlpha=1;
-  }
-
-  let lastChart = 0;
-  function frame(now){
-    shown += (target-shown)*0.04;
-    if(!calm) wave += 0.04;
-    drawTank();
-    if(now-lastChart > 1000){ drawChart(); lastChart = now; }
-    requestAnimationFrame(frame);
-  }
-
-  window.addEventListener("resize", drawChart);
-  poll(); setInterval(poll, 1500);
-  requestAnimationFrame(frame);
-})();
-</script>
 </body>
 </html>
 )rawliteral";
 
 // =====================================================
-//  Sensor + outputs
+//  Sensor Readings & LED Outputs
 // =====================================================
 int readWaterPercentage() {
   if (digitalRead(wire100) == LOW) return 100;
@@ -272,7 +184,7 @@ bool alarmActive() {
 }
 
 // =====================================================
-//  Web handlers
+//  Local Web Handlers
 // =====================================================
 void handleRoot() {
   server.send_P(200, "text/html; charset=utf-8", INDEX_HTML);
@@ -297,14 +209,203 @@ void handleLevelJSON() {
 void handleMute() {
   buzzerMuted = true;
   digitalWrite(buzzerPin, LOW);
+  updateTelemetrySnapshot(true);  // Notify cloud immediately of mute event
   server.send(200, "text/plain", "OK");
 }
 
 // =====================================================
-//  Setup / loop
+//  Cloud Sync & Bidirectional Command Execution
+//  (FreeRTOS Background Task on Core 0)
+// =====================================================
+void updateTelemetrySnapshot(bool triggerImmediateSend) {
+  if (telemetryMutex != NULL && xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    sharedTelemetry.waterLevel = level;
+    sharedTelemetry.probe25    = (digitalRead(wire25)  == LOW);
+    sharedTelemetry.probe50    = (digitalRead(wire50)  == LOW);
+    sharedTelemetry.probe75    = (digitalRead(wire75)  == LOW);
+    sharedTelemetry.probe100   = (digitalRead(wire100) == LOW);
+    sharedTelemetry.alarm      = alarmActive();
+    sharedTelemetry.muted      = buzzerMuted;
+    xSemaphoreGive(telemetryMutex);
+
+    if (triggerImmediateSend && cloudTaskHandle != NULL) {
+      xTaskNotifyGive(cloudTaskHandle);
+    }
+  }
+}
+
+void acknowledgeCloudCommand(int cmdId) {
+  WiFiClientSecure client;
+  client.setCACert(rootCACertificate);
+  client.setTimeout(8);
+
+  HTTPClient http;
+  http.setTimeout(8000);
+
+  String ackUrl = String(commandAckBaseUrl) + String(cmdId) + "/ack";
+  if (http.begin(client, ackUrl)) {
+    http.addHeader("Content-Type", "application/json");
+    #ifdef SECRETS_H
+    if (String(deviceApiKey).length() > 0) {
+      http.addHeader("X-Device-Key", deviceApiKey);
+    }
+    #endif
+
+    String ackBody = "{\"device_id\":\"esp32-tank-01\",\"status\":\"ACKNOWLEDGED\"}";
+    int httpCode = http.POST(ackBody);
+    if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_CREATED) {
+      Serial.printf("[Cloud] Command #%d confirmed & acknowledged successfully.\n", cmdId);
+    } else {
+      Serial.printf("[Cloud] Warning: Command ack returned HTTP %d\n", httpCode);
+    }
+    http.end();
+  }
+}
+
+void pollPendingCloudCommands() {
+  WiFiClientSecure client;
+  client.setCACert(rootCACertificate);
+  client.setTimeout(8);
+
+  HTTPClient http;
+  http.setTimeout(8000);
+
+  if (http.begin(client, commandPollEndpoint)) {
+    #ifdef SECRETS_H
+    if (String(deviceApiKey).length() > 0) {
+      http.addHeader("X-Device-Key", deviceApiKey);
+    }
+    #endif
+
+    int httpCode = http.GET();
+    if (httpCode == HTTP_CODE_OK) {
+      String response = http.getString();
+      // Check if command is present and is MUTE_ALARM
+      if (response.indexOf("\"command_type\":\"MUTE_ALARM\"") != -1) {
+        int idIdx = response.indexOf("\"id\":");
+        if (idIdx != -1) {
+          int start = idIdx + 5;
+          while (start < response.length() && (response[start] == ' ' || response[start] == ':')) start++;
+          int end = start;
+          while (end < response.length() && isDigit(response[end])) end++;
+          int cmdId = response.substring(start, end).toInt();
+
+          if (cmdId > 0) {
+            Serial.printf("[Cloud] Received remote command #%d: MUTE_ALARM\n", cmdId);
+
+            // Execute physical buzzer silencing
+            buzzerMuted = true;
+            digitalWrite(buzzerPin, LOW);
+            updateTelemetrySnapshot(true);
+
+            // Send acknowledgment back to cloud
+            acknowledgeCloudCommand(cmdId);
+          }
+        }
+      }
+    }
+    http.end();
+  }
+}
+
+void cloudSyncTask(void* pvParameters) {
+  TankTelemetry localTelemetry;
+  unsigned long lastSendTime = 0;
+  unsigned long lastCommandPoll = 0;
+  const unsigned long MIN_SEND_INTERVAL_MS = 2000;  // Throttle telemetry upload to min 2s
+  const unsigned long COMMAND_POLL_INTERVAL_MS = 3000; // Poll commands every 3s
+
+  for (;;) {
+    // Wait for 5-second periodic timer OR task notification (immediate state trigger)
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(5000));
+
+    unsigned long now = millis();
+
+    // Check Wi-Fi connectivity non-blockingly
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[Cloud] Wi-Fi disconnected. Attempting reconnect...");
+      WiFi.reconnect();
+      vTaskDelay(pdMS_TO_TICKS(3000));
+      continue;
+    }
+
+    // 1. Ensure NTP time is synchronized for TLS certificate validation
+    if (time(nullptr) < 1000000000) {
+      Serial.println("[Cloud] Synchronizing NTP time for TLS validation...");
+      int retries = 0;
+      while (time(nullptr) < 1000000000 && retries++ < 20) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+      }
+    }
+
+    // 2. Poll for pending remote commands from cloud
+    if (now - lastCommandPoll >= COMMAND_POLL_INTERVAL_MS) {
+      pollPendingCloudCommands();
+      lastCommandPoll = millis();
+    }
+
+    // 3. Throttle consecutive telemetry sends
+    if (now - lastSendTime < MIN_SEND_INTERVAL_MS) {
+      vTaskDelay(pdMS_TO_TICKS(MIN_SEND_INTERVAL_MS - (now - lastSendTime)));
+    }
+
+    // Safely copy current telemetry snapshot under mutex
+    bool hasData = false;
+    if (telemetryMutex != NULL && xSemaphoreTake(telemetryMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      localTelemetry = sharedTelemetry;
+      hasData = true;
+      xSemaphoreGive(telemetryMutex);
+    }
+
+    if (!hasData) {
+      continue;
+    }
+
+    // Construct JSON payload matching FastAPI WaterReadingCreate schema
+    String payload = "{";
+    payload += "\"water_level\":" + String(localTelemetry.waterLevel) + ",";
+    payload += "\"probe_25\":" + String(localTelemetry.probe25 ? "true" : "false") + ",";
+    payload += "\"probe_50\":" + String(localTelemetry.probe50 ? "true" : "false") + ",";
+    payload += "\"probe_75\":" + String(localTelemetry.probe75 ? "true" : "false") + ",";
+    payload += "\"probe_100\":" + String(localTelemetry.probe100 ? "true" : "false") + ",";
+    payload += "\"alarm\":" + String(localTelemetry.alarm ? "true" : "false") + ",";
+    payload += "\"muted\":" + String(localTelemetry.muted ? "true" : "false");
+    payload += "}";
+
+    // Perform HTTPS POST
+    WiFiClientSecure client;
+    client.setCACert(rootCACertificate);
+    client.setTimeout(8);
+
+    HTTPClient http;
+    http.setTimeout(8000);
+
+    if (http.begin(client, cloudEndpoint)) {
+      http.addHeader("Content-Type", "application/json");
+
+      int httpCode = http.POST(payload);
+      if (httpCode == HTTP_CODE_CREATED || httpCode == HTTP_CODE_OK) {
+        // Success
+      } else {
+        Serial.printf("[Cloud] Warning: Server returned non-2xx status (%d)\n", httpCode);
+      }
+      http.end();
+    } else {
+      Serial.println("[Cloud] Error: Unable to connect to host");
+    }
+
+    lastSendTime = millis();
+  }
+}
+
+// =====================================================
+//  Setup / Loop
 // =====================================================
 void setup() {
   Serial.begin(115200);
+
+  // Initialize mutex for thread-safe telemetry sharing
+  telemetryMutex = xSemaphoreCreateMutex();
 
   pinMode(wire25,  INPUT_PULLUP);
   pinMode(wire50,  INPUT_PULLUP);
@@ -320,6 +421,7 @@ void setup() {
 
   level = readWaterPercentage();
   updateLEDs(level);
+  updateTelemetrySnapshot(false);
 
   WiFi.begin(ssid, password);
   Serial.print("Connecting to Wi-Fi");
@@ -328,17 +430,35 @@ void setup() {
     Serial.print(".");
   }
   Serial.println("\nConnected!");
-  Serial.print("Dashboard URL: http://");
+  Serial.print("Local Dashboard URL: http://");
   Serial.println(WiFi.localIP());
+
+  // Configure NTP time synchronization for accurate TLS certificate validation
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
 
   server.on("/", handleRoot);
   server.on("/level", handleLevelJSON);
   server.on("/mute", HTTP_POST, handleMute);
   server.begin();
+
+  // Launch FreeRTOS background task on Core 0 for non-blocking cloud HTTPS communication & command polling
+  xTaskCreatePinnedToCore(
+    cloudSyncTask,      // Task function
+    "CloudSyncTask",    // Task name
+    10240,              // Stack depth (bytes, sufficient for TLS handshake)
+    NULL,               // Parameters
+    1,                  // Task priority
+    &cloudTaskHandle,   // Task handle
+    0                   // Pin to Core 0 (main Arduino loop runs on Core 1)
+  );
+
+  if (cloudTaskHandle != NULL) {
+    xTaskNotifyGive(cloudTaskHandle);
+  }
 }
 
 void loop() {
-  server.handleClient();  // runs every pass, so the page stays responsive
+  server.handleClient();  // runs every pass, so the local page stays responsive
 
   static unsigned long lastRead = 0;
   static unsigned long lastPrint = 0;
@@ -355,16 +475,19 @@ void loop() {
     } else if (reading == candidate) {
       if (++candidateCount >= STABLE_READS) {
         level = reading;
-        buzzerMuted = false;  // new level, so re-arm the alarm
+        buzzerMuted = false;  // new level, so re-arm the alarm automatically!
         candidate = -1;
         candidateCount = 0;
+        updateTelemetrySnapshot(true);  // Confirmed level change: trigger immediate cloud sync
       }
     } else {
       candidate = reading;
       candidateCount = 1;
     }
 
+    // Drive actual physical buzzer on GPIO 23
     digitalWrite(buzzerPin, (!buzzerMuted && alarmActive()) ? HIGH : LOW);
+    updateTelemetrySnapshot(false);
   }
 
   updateLEDs(level);  // every pass, so the 100% blink stays smooth
@@ -372,11 +495,12 @@ void loop() {
   // Serial log once per second
   if (now - lastPrint >= 1000) {
     lastPrint = now;
-    Serial.print("Pins [25%:");  Serial.print(digitalRead(wire25)  == LOW ? "WET" : "DRY");
-    Serial.print(" | 50%:");     Serial.print(digitalRead(wire50)  == LOW ? "WET" : "DRY");
-    Serial.print(" | 75%:");     Serial.print(digitalRead(wire75)  == LOW ? "WET" : "DRY");
-    Serial.print(" | 100%:");    Serial.print(digitalRead(wire100) == LOW ? "WET" : "DRY");
+    Serial.print("Pins [25%:");  Serial.print(digitalRead(wire25)  == LOW ? "FILLED" : "EMPTY");
+    Serial.print(" | 50%:");     Serial.print(digitalRead(wire50)  == LOW ? "FILLED" : "EMPTY");
+    Serial.print(" | 75%:");     Serial.print(digitalRead(wire75)  == LOW ? "FILLED" : "EMPTY");
+    Serial.print(" | 100%:");    Serial.print(digitalRead(wire100) == LOW ? "FILLED" : "EMPTY");
     Serial.print("] => Level: "); Serial.print(level);
-    Serial.print("% | Muted: "); Serial.println(buzzerMuted ? "YES" : "NO");
+    Serial.print("% | Alarm: "); Serial.print(alarmActive() ? "YES" : "NO");
+    Serial.print(" | Muted: "); Serial.println(buzzerMuted ? "YES" : "NO");
   }
 }

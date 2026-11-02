@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
 from .database import engine, Base, get_db
-from .routes import readings_router
+from .routes import readings_router, commands_router
 from .schemas import HealthResponse
 
 # Configure structured logging
@@ -26,7 +26,7 @@ logger = logging.getLogger("water_tank_backend")
 
 def init_db() -> bool:
     """
-    Attempts to create database tables defined in models.py.
+    Attempts to create database tables defined in models.py (water_readings and device_commands).
     Fails gracefully if PostgreSQL is unreachable during initial startup.
     Never prints connection strings or passwords to logs.
     """
@@ -58,11 +58,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="ESP32 IoT Water Tank Monitor API",
     description=(
-        "REST API backend for real-time water tank monitoring. "
-        "Receives sensor telemetry from ESP32 microcontrollers and serves "
-        "data to web dashboards."
+        "REST API backend for real-time water tank monitoring and remote buzzer control. "
+        "Receives sensor telemetry from ESP32 microcontrollers, processes remote mute commands, "
+        "and serves data to web dashboards."
     ),
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan
 )
 
@@ -77,6 +77,7 @@ app.add_middleware(
 
 # Register routes
 app.include_router(readings_router)
+app.include_router(commands_router)
 
 
 @app.get(
@@ -120,7 +121,7 @@ def root():
     """
     return {
         "service": "ESP32 IoT Water Tank Monitor API",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "status": "running",
         "docs_url": "/docs",
         "health_url": "/health"

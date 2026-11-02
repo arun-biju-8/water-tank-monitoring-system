@@ -9,6 +9,7 @@ backend/.env.*
 !backend/.env.example
 
 esp32/secrets.h
+**/secrets.h
 !esp32/secrets.example.h
 
 # Python artifacts
