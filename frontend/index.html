@@ -363,6 +363,99 @@
         </section>
 
         <!-- =============================================================== -->
+        <!-- Card: Water Quality (Presentation Demo)                         -->
+        <!-- =============================================================== -->
+        <section class="dash-card card-water-quality">
+          <div class="card-header">
+            <div>
+              <div class="card-title-group">
+                <h2 class="card-title">Water Quality</h2>
+                <span class="badge-demo-tag">Demo</span>
+              </div>
+              <span class="card-subtitle">Indicative potable water parameters</span>
+            </div>
+            <div class="quality-overall-badge">
+              <span class="status-dot dot-emerald"></span>
+              <span class="quality-overall-text">Good Quality</span>
+            </div>
+          </div>
+
+          <div class="quality-metrics-grid">
+            <!-- Parameter 1: pH Level -->
+            <div class="quality-param-card">
+              <div class="param-top">
+                <span class="param-name">pH Level</span>
+                <span class="param-status-tag tag-normal">Normal</span>
+              </div>
+              <div class="param-value-wrap">
+                <span class="param-value font-mono">7.2</span>
+                <span class="param-range">Optimal: 6.5 – 8.5</span>
+              </div>
+              <div class="param-bar-track">
+                <div class="param-bar-fill bar-ph" style="width: 51%;"></div>
+              </div>
+              <div class="param-bar-labels font-mono">
+                <span>0 (Acidic)</span>
+                <span>7.0</span>
+                <span>14 (Basic)</span>
+              </div>
+            </div>
+
+            <!-- Parameter 2: Turbidity -->
+            <div class="quality-param-card">
+              <div class="param-top">
+                <span class="param-name">Turbidity</span>
+                <span class="param-status-tag tag-clear">Clear</span>
+              </div>
+              <div class="param-value-wrap">
+                <span class="param-value font-mono">2.1</span>
+                <span class="param-unit font-mono">NTU</span>
+                <span class="param-range">Standard: &lt; 5.0 NTU</span>
+              </div>
+              <div class="param-bar-track">
+                <div class="param-bar-fill bar-turbidity" style="width: 42%;"></div>
+              </div>
+              <div class="param-bar-labels font-mono">
+                <span>0 NTU (Pure)</span>
+                <span>5 NTU (Threshold)</span>
+              </div>
+            </div>
+
+            <!-- Parameter 3: TDS -->
+            <div class="quality-param-card">
+              <div class="param-top">
+                <span class="param-name">Total Dissolved Solids</span>
+                <span class="param-status-tag tag-good">Good</span>
+              </div>
+              <div class="param-value-wrap">
+                <span class="param-value font-mono">180</span>
+                <span class="param-unit font-mono">ppm</span>
+                <span class="param-range">Ideal: &lt; 300 ppm</span>
+              </div>
+              <div class="param-bar-track">
+                <div class="param-bar-fill bar-tds" style="width: 36%;"></div>
+              </div>
+              <div class="param-bar-labels font-mono">
+                <span>0 ppm (Soft)</span>
+                <span>500 ppm (Limit)</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Simulation Disclaimer Notice -->
+          <div class="simulation-notice-bar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" class="notice-icon">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="16" x2="12" y2="12"></line>
+              <line x1="12" y1="8" x2="12.01" y2="8"></line>
+            </svg>
+            <span class="notice-text">
+              <strong>SIMULATED DATA – NOT MEASURED BY SENSORS</strong> &bull; Presentation mockup for UI demonstration. Physical ESP32 hardware currently measures liquid level using discrete water probes.
+            </span>
+          </div>
+        </section>
+
+        <!-- =============================================================== -->
         <!-- Card 4: Historical Trends (Chart.js)                           -->
         <!-- =============================================================== -->
         <section class="dash-card card-chart-section">
